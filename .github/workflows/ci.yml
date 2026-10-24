@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Dependências
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git gcc-c++ meson ninja-build clang-tools-extra \
+            vulkan-headers vulkan-loader-devel vulkan-utility-libraries-devel vulkan-validation-layers \
+            libX11-devel libxcb-devel libXtst-devel mesa-libGL-devel mesa-libEGL-devel \
+            libpng-devel libjpeg-turbo-devel systemd-devel tomlplusplus-devel catch2-devel qt6-qtbase-devel libstdc++-static \
+            xorg-x11-server-Xvfb dbus-daemon vulkan-tools glx-utils mesa-vulkan-drivers mesa-dri-drivers \
+            glibc-devel.i686 libstdc++-devel.i686 libstdc++-static.i686 libatomic.i686 libX11-devel.i686 libxcb-devel.i686 \
+            libXau-devel.i686 mesa-libGL-devel.i686 mesa-libEGL-devel.i686 vulkan-loader-devel.i686 \
+            mesa-dri-drivers.i686 mesa-vulkan-drivers.i686
+      - uses: actions/checkout@v4
+
+      - name: Formatação
+        run: clang-format --dry-run --Werror src/*/*.cpp src/*/*.h tests/*.cpp include/framux/*.h
+
+      - name: Build x86_64
+        run: |
+          meson setup build
+          ninja -C build
+
+      - name: Testes x86_64
+        run: meson test -C build --print-errorlogs
+
+      - name: Build i686 (camada + shim)
+        run: |
+          meson setup build32 --cross-file cross/i686-linux.ini -Dlayer_only=true --libdir=lib
+          ninja -C build32
+
+      - name: Testes i686
+        run: meson test -C build32 --print-errorlogs
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: testlogs
+          path: build*/meson-logs/
+
+  rpm:
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Dependências
+        run: dnf install -y --setopt=install_weak_deps=False git rpm-build rpmdevtools dnf-plugins-core
+      - uses: actions/checkout@v4
+      - name: RPM
+        run: |
+          dnf builddep -y packaging/framux.spec
+          V=$(rpmspec -q --qf '%{version}\n' packaging/framux.spec | head -1)
+          mkdir -p ~/rpmbuild/SOURCES
+          git config --global --add safe.directory "$PWD"
+          git archive --prefix=framux-$V/ -o ~/rpmbuild/SOURCES/framux-$V.tar.gz HEAD
+          rpmbuild -ba packaging/framux.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpms
+          path: ~/rpmbuild/RPMS/*/*.rpm
