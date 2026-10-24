@@ -1,0 +1,8 @@
+option('layer_only', type : 'boolean', value : false,
+  description : 'Compila só a camada Vulkan e o shim OpenGL (usado no build i686)')
+option('tests', type : 'boolean', value : true,
+  description : 'Compila os testes')
+option('systemd_user_unit_dir', type : 'string', value : '',
+  description : 'Diretório das unidades systemd --user (padrão: <prefix>/lib/systemd/user)')
+option('gui', type : 'feature', value : 'auto',
+  description : 'Janela de configuração em Qt 6 (framux-gui)')

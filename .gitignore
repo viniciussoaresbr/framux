@@ -1,0 +1,7 @@
+/build*/
+/subprojects/packagecache/
+*.rpm
+*.tar.gz
+compile_commands.json
+.cache/
+SPEC.md
