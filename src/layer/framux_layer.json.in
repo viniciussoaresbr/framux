@@ -1,0 +1,22 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_FRAMUX_overlay_@ARCH@",
+    "type": "GLOBAL",
+    "library_path": "@LIBRARY_PATH@",
+    "api_version": "1.3.0",
+    "implementation_version": "1",
+    "description": "Framux: contador de FPS, benchmark e screenshots",
+    "functions": {
+      "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion",
+      "vkGetInstanceProcAddr": "framux_GetInstanceProcAddr",
+      "vkGetDeviceProcAddr": "framux_GetDeviceProcAddr"
+    },
+    "enable_environment": {
+      "FRAMUX": "1"
+    },
+    "disable_environment": {
+      "DISABLE_FRAMUX": "1"
+    }
+  }
+}
