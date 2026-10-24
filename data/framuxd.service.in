@@ -1,0 +1,17 @@
+[Unit]
+Description=Framux daemon (contador de FPS, benchmark e screenshots)
+Documentation=man:framux(1) https://github.com/viniciussoaresbr/framux
+Requires=framuxd.socket
+After=framuxd.socket
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/framuxd
+Restart=on-failure
+# Sem rede em nenhum componente (§C.11).
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

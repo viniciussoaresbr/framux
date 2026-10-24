@@ -1,0 +1,48 @@
+# Configuração do Framux — copie para ~/.config/framux/config.toml.
+# Overrides por jogo: ~/.config/framux/games/<exe>.toml (Wine: wine-<exe>.toml).
+# FRAMUX_CONFIG aponta outro arquivo. Alterações são recarregadas sozinhas.
+
+[general]
+notifications      = true          # notificação ao salvar benchmark/screenshot (sem opção na janela)
+
+[hotkeys]                          # "F9", "Ctrl+Shift+F9", "Mouse4", "" = desativada
+benchmark          = "F11"
+overlay            = "F12"         # mostra/oculta o overlay no canto de [overlay] corner
+overlay_corner     = "Shift+F12"   # alterna o canto: TL → TR → BR → BL
+screenshot         = "F10"
+video              = "F9"          # gravação ainda não disponível nesta versão
+loop_save          = ""
+push_to_talk       = ""
+backend            = "auto"        # auto | x11 | ingame  (portal/evdev: futuros)
+
+[overlay]
+corner             = "top-left"    # top-left | top-right | bottom-right | bottom-left | hidden
+update             = "smooth"      # smooth (janela de 1 s, texto a cada 100 ms) | once_per_second
+during_benchmark   = "hide_after_1s" # hide_after_1s (como o FRAPS) | show | hide
+scale              = 1.0
+show_frametime     = false
+color_normal       = "#C6F432"
+color_recording    = "#FF3030"
+color_benchmark    = "#30FF60"
+
+[benchmark]
+folder             = "~/.local/share/framux/benchmarks"
+stop_after_s       = 0             # 0 = manual
+logs               = ["frametimes", "fps", "summary"]
+timing             = "present"
+
+[screenshot]
+folder             = "$XDG_PICTURES_DIR/framux"
+format             = "png"         # png | jpeg | bmp | tga
+jpeg_quality       = 92
+include_overlay    = false
+repeat_every_s     = 0             # > 0: a hotkey liga/desliga capturas a cada N s
+
+[stats_export]
+enabled            = true          # $XDG_RUNTIME_DIR/framux/stats + sinal D-Bus StatsChanged
+
+[filters]
+exclude = ["steamwebhelper", "firefox", "chrome", "chromium", "thunderbird",
+           "Xwayland", "gamescope", "framux", "framuxd", "obs"]
+include = []                       # não vazio = só esses; no modo automático,
+                                   # também ativa jogos nativos fora da Steam

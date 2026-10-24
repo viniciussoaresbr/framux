@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Framux
+GenericName=Contador de FPS
+Comment=Contador de FPS, benchmark e screenshots para jogos
+Exec=framux-gui
+Icon=io.github.framux
+Terminal=false
+Categories=Game;Utility;
+Keywords=fps;benchmark;screenshot;overlay;fraps;vulkan;
+StartupNotify=true
