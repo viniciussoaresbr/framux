@@ -91,7 +91,7 @@ RecorderResult record(const std::string &dir, const std::string &name, const std
     }
     // Jitter de ±2 ms, como presents reais.
     const uint64_t t = t0 + uint64_t(i) * period + (i % 2 ? 2'000'000 : 0);
-    rec.push_video(frame.data(), W, H, W * 4, 44, false, t, [&released] { ++released; });
+    rec.push_video(frame.data(), W, H, W * 4, 44, false, false, t, [&released] { ++released; });
     // A camada só reusa o slot depois do release; aqui, espera a conversão.
     while (released < i + 1 - (i >= 25 ? 5 : 0)) usleep(200);
   }
@@ -184,7 +184,7 @@ void check_colors(const std::string &dir, bool flip) {
   }
   std::atomic<int> released = 0;
   for (int i = 0; i < 10; ++i) {
-    rec.push_video(frame.data(), W, H, W * 4, 44, flip, 1'000'000'000ull + uint64_t(i) * 33'333'333ull,
+    rec.push_video(frame.data(), W, H, W * 4, 44, flip, false, 1'000'000'000ull + uint64_t(i) * 33'333'333ull,
                    [&released] { ++released; });
     while (released < i + 1) usleep(200);
   }
@@ -194,6 +194,51 @@ void check_colors(const std::string &dir, bool flip) {
   CHECK(first_pixel_yuv(r.path, W / 2, H / 4, top));
   CHECK(first_pixel_yuv(r.path, W / 2, H * 3 / 4, bottom));
   std::printf("cores%s: cima %d/%d/%d, baixo %d/%d/%d\n", flip ? " (flip)" : "", top[0], top[1], top[2], bottom[0],
+              bottom[1], bottom[2]);
+  auto near = [](const int *v, int y, int u, int w) {
+    return std::abs(v[0] - y) <= 4 && std::abs(v[1] - u) <= 4 && std::abs(v[2] - w) <= 4;
+  };
+  CHECK(near(top, 63, 102, 240));
+  CHECK(near(bottom, 235, 128, 128));
+}
+
+// NV12 já convertido e reduzido na GPU (camada 0.4.2+): com "metade" na
+// config, o gravador não reduz de novo e preserva as cores.
+void check_nv12(const std::string &dir) {
+  const std::string path = dir + "/nv12.mkv";
+  RecorderOptions opt;
+  opt.fd = open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  opt.path = path;
+  opt.fps = 30;
+  opt.half = true;
+  opt.encoder = "av1_sw";
+  opt.quality = "high";
+  opt.available = {"av1_sw"};
+  Recorder rec(opt);
+  constexpr uint32_t W = 320, H = 240, S = 324;  // stride com folga, como a camada
+  std::vector<uint8_t> frame(size_t(S) * H * 3 / 2);
+  for (uint32_t y = 0; y < H; ++y)
+    for (uint32_t x = 0; x < S; ++x) frame[size_t(y) * S + x] = y < H / 2 ? 63 : 235;
+  for (uint32_t y = 0; y < H / 2; ++y)
+    for (uint32_t x = 0; x < S; x += 2) {
+      uint8_t *uv = &frame[size_t(S) * H + size_t(y) * S + x];
+      uv[0] = y < H / 4 ? 102 : 128;
+      uv[1] = y < H / 4 ? 240 : 128;
+    }
+  std::atomic<int> released = 0;
+  for (int i = 0; i < 10; ++i) {
+    rec.push_video(frame.data(), W, H, S, 1000156003, false, true, 1'000'000'000ull + uint64_t(i) * 33'333'333ull,
+                   [&released] { ++released; });
+    while (released < i + 1) usleep(200);
+  }
+  const RecorderResult r = rec.finish();
+  CHECK(r.ok);
+  const Probe p = probe(r.path);
+  CHECK(p.width == int(W) && p.height == int(H));
+  int top[3] = {}, bottom[3] = {};
+  CHECK(first_pixel_yuv(r.path, W / 2, H / 4, top));
+  CHECK(first_pixel_yuv(r.path, W / 2, H * 3 / 4, bottom));
+  std::printf("nv12: %dx%d, cima %d/%d/%d, baixo %d/%d/%d\n", p.width, p.height, top[0], top[1], top[2], bottom[0],
               bottom[1], bottom[2]);
   auto near = [](const int *v, int y, int u, int w) {
     return std::abs(v[0] - y) <= 4 && std::abs(v[1] - u) <= 4 && std::abs(v[2] - w) <= 4;
@@ -243,6 +288,7 @@ int main() {
 
   check_colors(dir, false);
   check_colors(dir, true);
+  check_nv12(dir);
 
   // Sem nenhum quadro: erro e nenhum arquivo vazio na pasta.
   {

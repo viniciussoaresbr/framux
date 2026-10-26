@@ -55,8 +55,11 @@ png_probe = executable('png_probe', files('png_probe.cpp'), dependencies : png_d
 video_probe = executable('video_probe', files('video_probe.cpp'),
   dependencies : [dependency('libavformat'), dependency('libavcodec'), dependency('libavutil')])
 e2e_deps = [framux_gl, framux_vk, framuxd, framux_cli, png_probe, video_probe]
+if vulkan_link.found() and xcb_link.found()
+  e2e_deps += vk_present  # video-color
+endif
 xtst_dep = dependency('xtst', required : false)
-e2e_scenarios = ['vulkan', 'gl', 'kill', 'reconnect', 'pause', 'auto', 'reload', 'video', 'video-gl', 'video-kill']
+e2e_scenarios = ['vulkan', 'gl', 'kill', 'reconnect', 'pause', 'auto', 'reload', 'video', 'video-half', 'video-color', 'video-gl', 'video-kill']
 if xtst_dep.found()
   e2e_deps += executable('xkey', files('xkey.cpp'), dependencies : [xtst_dep, x11_dep])
   e2e_scenarios += 'hotkeys'

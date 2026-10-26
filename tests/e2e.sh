@@ -2,7 +2,7 @@
 # Testes ponta a ponta (§C.12 testes 1, 2, 5, 8, 10) com daemon, camada/shim e
 # CLI reais, num ambiente isolado (XDG_RUNTIME_DIR, config e D-Bus próprios).
 # Requer: Xvfb (via with_xvfb.sh), dbus-run-session, vkcube e glxgears.
-# uso: e2e.sh <builddir> <cenário: vulkan|gl|kill|reconnect|pause|hotkeys|auto|reload|video|video-gl|video-kill>
+# uso: e2e.sh <builddir> <cenário: vulkan|gl|kill|reconnect|pause|hotkeys|auto|reload|video|video-half|video-color|video-gl|video-kill>
 set -u
 B=$1
 SCENARIO=$2
@@ -16,6 +16,7 @@ fi
 
 case $SCENARIO in
   gl|video-gl) APP=(glxgears) ;;
+  video-color) PATH=$B/tests:$PATH APP=(vk_present_test) ;;  # limpa a tela de azul puro
   *) APP=(vkcube --wsi xcb --c 1000000) ;;
 esac
 command -v "${APP[0]}" >/dev/null || { echo "${APP[0]} ausente"; exit 77; }
@@ -73,6 +74,12 @@ check_video() {
   [ -z "$2" ] || [ "$codec" = "$2" ] || fail "codec $codec, esperado $2"
   [ "$w" -eq "$3" ] && [ "$h" -eq "$4" ] || fail "tamanho ${w}x$h, esperado $3x$4"
   [ "$n" -ge "$5" ] || fail "só $n quadros"
+  # Medição ao parar: FPS antes/durante, custo da cópia no jogo, CPU do daemon.
+  local cost
+  for _ in $(seq 50); do cost=$(grep -m1 "medição da gravação" "$T/daemon.log") && break; sleep 0.1; done
+  echo "${cost#*] }"
+  echo "$cost" | grep -q "gravando; cópia na thread do jogo [0-9.]* ms por quadro" || fail "medição sem o custo da camada"
+  echo "$cost" | grep -q "framuxd [0-9.]* núcleos" || fail "medição sem a CPU do daemon"
 }
 check_bench() {
   local summary
@@ -216,9 +223,14 @@ case $SCENARIO in
     framux shot >/dev/null || fail "screenshot depois da pausa"
     echo "pausa ok"
     ;;
-  video)
+  video | video-half)
     # Teste 8 (reduzido): 2 s a 30 fps com o encoder automático, MP4 no fim.
+    # A cor é convertida (e, em video-half, reduzida) na GPU pela camada, sob
+    # a camada de validação Khronos quando instalada.
     sed -i 's/^\[video\]$/[video]\ncontainer = "mp4"/' "$XDG_CONFIG_HOME/framux/config.toml"
+    [ "$SCENARIO" = video-half ] && sed -i 's/^\[video\]$/[video]\nscale = "half"/' "$XDG_CONFIG_HOME/framux/config.toml"
+    ls /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json >/dev/null 2>&1 &&
+      export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
     start_daemon
     start_app
     wait_session
@@ -228,7 +240,28 @@ case $SCENARIO in
     sleep 2
     framux rec stop >/dev/null || fail "rec stop"
     # vkcube usa a janela padrão de 500×500.
-    check_video mp4 "" 500 500 50
+    if [ "$SCENARIO" = video-half ]; then check_video mp4 "" 250 250 50; else check_video mp4 "" 500 500 50; fi
+    grep -q "cor convertida na GPU" "$T/daemon.log" || fail "a cor não foi convertida na GPU"
+    ! grep -m3 "Validation Error" "$T/app.log" || fail "erros da camada de validação"
+    ;;
+  video-color)
+    # Cores da conversão na GPU: azul puro (0, 0, 255) em BT.709 de faixa
+    # limitada é Y 32, U 240, V 118 (± compressão).
+    ls /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json >/dev/null 2>&1 &&
+      export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation
+    start_daemon
+    start_app
+    wait_session
+    framux rec start >/dev/null || fail "rec start"
+    sleep 2
+    framux rec stop >/dev/null || fail "rec stop"
+    check_video mkv "" 640 480 50
+    grep -q "cor convertida na GPU" "$T/daemon.log" || fail "a cor não foi convertida na GPU"
+    ! grep -m3 "Validation Error" "$T/app.log" || fail "erros da camada de validação"
+    read -r _ y u v <<<"$("$B/tests/video_probe" "$(ls "$T"/videos/*.mkv)" --pixel 320 240 | grep '^pixel')"
+    echo "pixel central: Y $y U $u V $v"
+    near() { [ "${1:-0}" -ge $(($2 - 4)) ] && [ "${1:-0}" -le $(($2 + 4)) ]; }
+    near "$y" 32 && near "$u" 240 && near "$v" 118 || fail "cor errada: Y $y U $u V $v (esperado 32/240/118)"
     ;;
   video-gl)
     # OpenGL (PBO, linhas invertidas) em Ut Video sem perda e metade do tamanho.

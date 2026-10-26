@@ -10,6 +10,7 @@
 #include "common/overlay.h"
 #include "common/paths.h"
 #include "common/ring.h"
+#include "common/video_rate.h"
 
 using namespace framux;
 
@@ -81,6 +82,17 @@ TEST_CASE("config: encoders removidos (HEVC, FFV1) migram sem aviso", "[config]"
   REQUIRE(apply_config_toml(c, "[video]\nencoder = \"h265\"\n", "t.toml", &w));
   REQUIRE(c.video.encoder == "utvideo");  // inválido: mantém
   REQUIRE(w.size() == 1);
+}
+
+TEST_CASE("vídeo: teto de taxa por resolução, fps e qualidade", "[video]") {
+  // 2560×1080 a 60 fps, H.264 alta: ~20 Mbit/s (o openh264 do Fedora toca).
+  REQUIRE(video_max_bitrate(false, "high", 2560, 1080, 60) == 19'906'560);
+  REQUIRE(video_max_bitrate(false, "medium", 1920, 1080, 60) < video_max_bitrate(false, "high", 1920, 1080, 60));
+  REQUIRE(video_max_bitrate(false, "low", 1920, 1080, 60) < video_max_bitrate(false, "medium", 1920, 1080, 60));
+  REQUIRE(video_max_bitrate(true, "high", 1920, 1080, 60) < video_max_bitrate(false, "high", 1920, 1080, 60));
+  REQUIRE(std::llabs(int64_t(video_max_bitrate(false, "high", 1920, 1080, 30) * 2) -
+                     int64_t(video_max_bitrate(false, "high", 1920, 1080, 60))) <= 2);
+  REQUIRE(video_max_bitrate(false, "lossless", 1920, 1080, 60) == 0);
 }
 
 TEST_CASE("config: ida e volta pelo TOML", "[config]") {
