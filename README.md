@@ -1,9 +1,10 @@
 # Framux
 
-Ferramenta nativa para Linux (Fedora) com contador de FPS dentro do
-jogo, benchmark por hotkey com CSV moderno, screenshots e gravação do jogo
-com o áudio dele. Funciona com Vulkan, OpenGL e todo Direct3D via
-Proton/DXVK/VKD3D/WineD3D, em X11 e Wayland.
+Alternativa melhorada ao FRAPS, nativa para Linux. Mantém a interface
+simples e direta do FRAPS (contador de FPS, benchmark, screenshots e
+gravação) e moderniza a gravação: codificação pela placa de vídeo, arquivos
+compactos e baixo impacto no desempenho do jogo. Funciona com Vulkan, OpenGL
+e Direct3D via Proton/DXVK/VKD3D/WineD3D, em X11 e Wayland.
 
 Binários `framux` (CLI e janela) e `framuxd` (daemon), prefixo de ambiente
 `FRAMUX_`, camada `VK_LAYER_FRAMUX_overlay_<arch>`.
@@ -157,19 +158,36 @@ em MKV). Uma notificação mostra o arquivo, a duração e o tamanho.
 
 | Codificador | Encoders do FFmpeg | Observação |
 |---|---|---|
-| Automático | o primeiro que funcionar: AV1 por hardware, SVT-AV1, H.264 por hardware, x264, Ut Video | detectados ao iniciar o daemon (`framuxd --probe-encoders`) |
+| Automático | o primeiro que funcionar: AV1 por hardware, H.264 por hardware, SVT-AV1, x264, Ut Video | detectados ao iniciar o daemon (`framuxd --probe-encoders`) |
 | AV1 (placa de vídeo) | `av1_nvenc` (RTX 40+), `av1_vaapi` (AMD RX 7000+, Intel Arc) | |
 | AV1 (processador) | `libsvtav1`, preset 10 | sempre no `ffmpeg-free`; ~90 fps em 2560×1080 num i5-9400F |
 | H.264 (placa de vídeo) | `h264_nvenc`, `h264_vaapi` | no Fedora, VA-API exige `mesa-va-drivers-freeworld` (RPM Fusion) |
 | H.264 (processador) | `libx264` | só com o FFmpeg do RPM Fusion |
 | Ut Video sem perda | `utvideo` em RGB planar, preditor mediana | qualidade *Sem perda* força este; ~230 fps em 2560×1080 num i5-9400F, 5 GB ou mais por minuto em 1080p60. Substituiu o FFV1, que não passava de 37 fps nessa resolução |
 
-Por que AV1 primeiro: o `ffmpeg-free` do Fedora (usado por VLC, Totem e
-afins) decodifica AV1 com o dav1d, rápido e em vários núcleos, mas H.264 só
-pelo openh264, num núcleo. Num i5-9400F, um H.264 de 2560×1080 a 60 fps em
-qualidade alta decodifica a 0,74× do tempo real (o vídeo trava no player,
-embora o arquivo esteja completo); o mesmo trecho em AV1, a 6×. HEVC saiu
-das opções porque o Fedora não tem decodificador para ele.
+Codificador da placa primeiro: grava quase sem CPU, ao contrário do AV1 pelo
+processador, que ocupa vários núcleos durante o jogo. AV1 antes de H.264
+quando a placa tem os dois (arquivos menores).
+
+A qualidade é constante, com **teto de taxa** por resolução e FPS
+(`src/common/video_rate.h`): 0,12 bit por pixel por quadro na qualidade
+alta, 0,08 na média e 0,05 na baixa, ~35% menos em AV1. Em 2560×1080 a
+60 fps, H.264 alto fica em até 20 Mbit/s (~150 MB/min), contra 50–65 Mbit/s
+sem teto em cenas pesadas. A aba Gravações mostra a estimativa para a tela.
+
+O teto também resolve a reprodução no Fedora sem RPM Fusion: o `ffmpeg-free`
+(usado por VLC, Totem e afins) decodifica H.264 só pelo openh264, num
+núcleo. Num i5-9400F, o H.264 de 2560×1080 a 60 fps sem teto decodificava a
+0,53× do tempo real (o vídeo travava no player); com 20 Mbit/s, a 1,4×. AV1
+(dav1d) decodifica a 6×. HEVC saiu das opções porque o Fedora não tem
+decodificador para ele.
+
+Ao parar, o log do daemon (`journalctl --user -u framuxd`) traz uma linha
+`medição da gravação` com o custo dela: FPS do jogo (média e 1% low) nos
+10 s antes e durante a gravação, quanto a cópia de cada quadro levou na
+thread do jogo e quantos núcleos o `framuxd` (conversão de cor + encoder)
+usou. Junto com a linha `gravação salva` (quadros repetidos e descartados),
+diz se a gravação está pesando no jogo.
 
 O som do jogo vem só do processo dele (`application.process.id` no
 PipeWire, inclusive Wine/Proton e o Steam Flatpak): música, chamadas e avisos
@@ -255,10 +273,13 @@ CLI, daemon, unidades systemd user, `.desktop` e ícone) e `framux-layer`
   Vulkan e GL (benchmark e screenshots com/sem overlay), jogo morto no meio do
   benchmark, daemon caindo/voltando, hotkeys in-game via XTest, modo
   automático (app comum intocado, jogo da Steam vira sessão), mudança no
-  `config.toml` chegando ao jogo aberto e gravação (Vulkan com MP4, GL em
-  Ut Video na metade do tamanho, jogo morto no meio, F9);
+  `config.toml` chegando ao jogo aberto e gravação (Vulkan com MP4 e cor
+  convertida na GPU sob a camada de validação, inteiro e na metade, cores
+  conferidas pixel a pixel; GL em Ut Video na metade do tamanho, jogo morto
+  no meio, F9);
 - **recorder** — gravador com quadros e áudio sintéticos: buraco de quadros
-  vira repetição, trilha Opus, duração, remux para MP4, nada de arquivo vazio;
+  vira repetição, trilha Opus, duração, remux para MP4, nada de arquivo vazio,
+  cores BT.709 e orientação, NV12 vindo da GPU, pixels exatos no sem perda;
 - **audio-capture** — PipeWire + WirePlumber privados: um seno tocado pelo
   próprio processo é achado pelo PID e capturado;
 - **gui** — janela em `QT_QPA_PLATFORM=offscreen` com cliques e teclas
@@ -313,9 +334,16 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits.
 - **GUI**: abas Geral, FPS, Gravações e Capturas no topo. Sem moc (callbacks em vez de
   signals/slots próprios). Fechar a janela nunca para o monitoramento, que é
   do daemon; "Parar o Framux" para o daemon e fecha a janela.
-- **Gravação por cópia em memória compartilhada.** A camada copia o quadro
-  para um buffer *host-visible* (Vulkan) ou um anel de 3 PBOs (OpenGL) e daí para um de 4 slots num memfd compartilhado; o daemon converte
-  (swscale em fatias paralelas, BT.709) numa thread e devolve o slot na hora;
+- **Gravação por cópia em memória compartilhada, com a cor convertida na
+  GPU.** No Vulkan, a camada copia o quadro para um buffer na memória da
+  placa e um compute shader (`src/layer/rgb_to_nv12.comp`) escreve NV12
+  BT.709 de faixa limitada, já na metade do tamanho se pedido, no buffer
+  *host-visible* que a CPU lê: 1,5 byte por pixel em vez de 4 (60% menos
+  tráfego e cópia na thread do jogo) e nenhuma conversão no processador.
+  No sem perda (RGB), em OpenGL (anel de 3 PBOs) ou se a fila não tiver
+  compute, o quadro vai em RGB e o daemon converte (swscale em fatias
+  paralelas). Daí para um de 4 slots num memfd compartilhado; o daemon
+  converte o que faltar numa thread e devolve o slot na hora;
   outra thread codifica, com até 16 quadros convertidos na fila entre as
   duas para absorver a abertura do encoder e os picos do SVT-AV1. Sem slot
   livre, o quadro é descartado e o daemon repete o anterior: o jogo nunca
