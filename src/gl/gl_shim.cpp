@@ -537,6 +537,7 @@ void poll_video(Ctx &c) {
     f.DeleteSync(oldest->fence);
     oldest->fence = nullptr;
     oldest->seq = 0;
+    const uint64_t t0 = now_ns();
     GLint prev = 0;
     f.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prev);
     f.BindBuffer(GL_PIXEL_PACK_BUFFER, oldest->pbo);
@@ -547,6 +548,7 @@ void poll_video(Ctx &c) {
       f.UnmapBuffer(GL_PIXEL_PACK_BUFFER);
     }
     f.BindBuffer(GL_PIXEL_PACK_BUFFER, GLuint(prev));
+    Runtime::get().add_video_cost(now_ns() - t0);
   }
 }
 
@@ -579,11 +581,13 @@ void start_video_read(Ctx &c, uint32_t w, uint32_t h, uint64_t present_ns) {
     end_read(c, s, true);
     return;
   }
+  const uint64_t t0 = now_ns();
   std::vector<uint8_t> buf(size_t(w) * h * 4);
   begin_read(c, s, false);
   f.ReadPixels(0, 0, GLsizei(w), GLsizei(h), GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
   end_read(c, s, false);
   Runtime::get().video_write(buf.data(), w, h, w * 4, kVkFormatRgba8, ipc::kImgFlipY, present_ns);
+  Runtime::get().add_video_cost(now_ns() - t0);
 }
 
 // ---------------------------------------------------------------------------
