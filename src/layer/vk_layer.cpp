@@ -68,6 +68,23 @@ struct PendingCapture {
   uint64_t present_ns;
 };
 
+// Buffer host-visible para ler o swapchain (screenshot ou gravação).
+struct HostBuffer {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkDeviceSize size = 0;
+  bool coherent = false;
+};
+
+// Gravação: alguns quadros em voo para a cópia nunca esperar a GPU.
+constexpr uint32_t kVideoStaging = 3;
+
+struct VideoInflight {
+  uint32_t staging;
+  uint32_t image;
+  uint64_t present_ns;
+};
+
 struct SwapchainData {
   DeviceData *dev;
   VkSwapchainKHR handle;
@@ -91,12 +108,13 @@ struct SwapchainData {
   std::vector<VkSemaphore> semaphores;
   std::vector<bool> fence_in_flight;
 
-  VkBuffer cap_buffer = VK_NULL_HANDLE;
-  VkDeviceMemory cap_memory = VK_NULL_HANDLE;
-  VkDeviceSize cap_size = 0;
-  bool cap_coherent = false;
+  HostBuffer cap;
   std::deque<PendingCapture> cap_inflight;  // no máximo um, na prática
   std::deque<client::CaptureRequest> cap_waiting;
+
+  HostBuffer video[kVideoStaging];
+  bool video_busy[kVideoStaging] = {};
+  std::deque<VideoInflight> video_inflight;
 };
 
 std::mutex g_mu;
@@ -151,6 +169,12 @@ int32_t find_memory_type(const DeviceData &d, uint32_t bits, VkMemoryPropertyFla
 // ---------------------------------------------------------------------------
 // Recursos por swapchain
 
+void free_host_buffer(DeviceData &d, HostBuffer &b) {
+  if (b.buffer) d.vtable.DestroyBuffer(d.device, b.buffer, nullptr);
+  if (b.memory) d.vtable.FreeMemory(d.device, b.memory, nullptr);
+  b = HostBuffer{};
+}
+
 void destroy_resources(SwapchainData &sc) {
   DeviceData &d = *sc.dev;
   auto &vt = d.vtable;
@@ -166,8 +190,10 @@ void destroy_resources(SwapchainData &sc) {
   for (VkImageView v : sc.views) vt.DestroyImageView(d.device, v, nullptr);
   if (sc.render_pass) vt.DestroyRenderPass(d.device, sc.render_pass, nullptr);
   if (sc.pool) vt.DestroyCommandPool(d.device, sc.pool, nullptr);
-  if (sc.cap_buffer) vt.DestroyBuffer(d.device, sc.cap_buffer, nullptr);
-  if (sc.cap_memory) vt.FreeMemory(d.device, sc.cap_memory, nullptr);
+  free_host_buffer(d, sc.cap);
+  for (HostBuffer &b : sc.video) free_host_buffer(d, b);
+  for (bool &b : sc.video_busy) b = false;
+  sc.video_inflight.clear();
   sc.fences.clear();
   sc.semaphores.clear();
   sc.framebuffers.clear();
@@ -176,8 +202,6 @@ void destroy_resources(SwapchainData &sc) {
   sc.fence_in_flight.clear();
   sc.render_pass = VK_NULL_HANDLE;
   sc.pool = VK_NULL_HANDLE;
-  sc.cap_buffer = VK_NULL_HANDLE;
-  sc.cap_memory = VK_NULL_HANDLE;
   sc.ready = false;
 }
 
@@ -286,63 +310,68 @@ bool init_resources(SwapchainData &sc, uint32_t family) {
   return true;
 }
 
-bool ensure_capture_buffer(SwapchainData &sc, VkDeviceSize size) {
-  if (sc.cap_buffer && sc.cap_size >= size) return true;
-  DeviceData &d = *sc.dev;
+bool ensure_host_buffer(DeviceData &d, HostBuffer &b, VkDeviceSize size) {
+  if (b.buffer && b.size >= size) return true;
   auto &vt = d.vtable;
-  if (sc.cap_buffer) vt.DestroyBuffer(d.device, sc.cap_buffer, nullptr);
-  if (sc.cap_memory) vt.FreeMemory(d.device, sc.cap_memory, nullptr);
-  sc.cap_buffer = VK_NULL_HANDLE;
-  sc.cap_memory = VK_NULL_HANDLE;
+  free_host_buffer(d, b);
 
   VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bci.size = size;
   bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  if (vt.CreateBuffer(d.device, &bci, nullptr, &sc.cap_buffer) != VK_SUCCESS) return false;
+  if (vt.CreateBuffer(d.device, &bci, nullptr, &b.buffer) != VK_SUCCESS) return false;
   VkMemoryRequirements req;
-  vt.GetBufferMemoryRequirements(d.device, sc.cap_buffer, &req);
-  const int32_t type = find_memory_type(d, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &sc.cap_coherent);
+  vt.GetBufferMemoryRequirements(d.device, b.buffer, &req);
+  const int32_t type = find_memory_type(d, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &b.coherent);
   VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   mai.allocationSize = req.size;
   mai.memoryTypeIndex = uint32_t(type);
-  if (type < 0 || vt.AllocateMemory(d.device, &mai, nullptr, &sc.cap_memory) != VK_SUCCESS ||
-      vt.BindBufferMemory(d.device, sc.cap_buffer, sc.cap_memory, 0) != VK_SUCCESS) {
-    vt.DestroyBuffer(d.device, sc.cap_buffer, nullptr);
-    sc.cap_buffer = VK_NULL_HANDLE;
+  if (type < 0 || vt.AllocateMemory(d.device, &mai, nullptr, &b.memory) != VK_SUCCESS ||
+      vt.BindBufferMemory(d.device, b.buffer, b.memory, 0) != VK_SUCCESS) {
+    free_host_buffer(d, b);
     return false;
   }
-  sc.cap_size = size;
+  b.size = size;
+  return true;
+}
+
+// Mapeia `b` e chama fn(ptr); devolve false se o mapeamento falhar.
+template <class Fn>
+bool read_host_buffer(DeviceData &d, const HostBuffer &b, Fn &&fn) {
+  auto &vt = d.vtable;
+  void *ptr = nullptr;
+  if (vt.MapMemory(d.device, b.memory, 0, VK_WHOLE_SIZE, 0, &ptr) != VK_SUCCESS) return false;
+  if (!b.coherent) {
+    VkMappedMemoryRange r{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, b.memory, 0, VK_WHOLE_SIZE};
+    vt.InvalidateMappedMemoryRanges(d.device, 1, &r);
+  }
+  fn(static_cast<const uint8_t *>(ptr));
+  vt.UnmapMemory(d.device, b.memory);
   return true;
 }
 
 // Envia ao daemon a captura cujo command buffer já terminou.
 void finish_capture(SwapchainData &sc, const PendingCapture &pc) {
-  DeviceData &d = *sc.dev;
-  auto &vt = d.vtable;
   Runtime &rt = Runtime::get();
   const uint32_t bpp = bytes_per_pixel(sc.format);
   const size_t size = size_t(sc.extent.width) * sc.extent.height * bpp;
-  void *ptr = nullptr;
-  if (vt.MapMemory(d.device, sc.cap_memory, 0, VK_WHOLE_SIZE, 0, &ptr) != VK_SUCCESS) {
+  const int fd = memfd_create("framux-frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  bool ok = fd >= 0 && ftruncate(fd, off_t(size)) == 0;
+  const bool mapped = read_host_buffer(*sc.dev, sc.cap, [&](const uint8_t *ptr) {
+    size_t done = 0;
+    while (ok && done < size) {
+      const ssize_t w = pwrite(fd, ptr + done, size - done, off_t(done));
+      if (w <= 0)
+        ok = false;
+      else
+        done += size_t(w);
+    }
+  });
+  if (!mapped) {
+    if (fd >= 0) close(fd);
     rt.send_capture_error(pc.req.request_id, "falha ao mapear a memória da captura");
     return;
   }
-  if (!sc.cap_coherent) {
-    VkMappedMemoryRange r{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, sc.cap_memory, 0, VK_WHOLE_SIZE};
-    vt.InvalidateMappedMemoryRanges(d.device, 1, &r);
-  }
-  const int fd = memfd_create("framux-frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-  bool ok = fd >= 0 && ftruncate(fd, off_t(size)) == 0;
-  size_t done = 0;
-  while (ok && done < size) {
-    const ssize_t w = pwrite(fd, static_cast<const char *>(ptr) + done, size - done, off_t(done));
-    if (w <= 0)
-      ok = false;
-    else
-      done += size_t(w);
-  }
-  vt.UnmapMemory(d.device, sc.cap_memory);
   if (!ok) {
     if (fd >= 0) close(fd);
     rt.send_capture_error(pc.req.request_id, "falha ao copiar o quadro");
@@ -375,7 +404,27 @@ void poll_captures(SwapchainData &sc, bool wait_image, uint32_t image) {
   }
 }
 
-void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image) {
+// Gravação: entrega ao runtime os quadros cuja cópia já terminou.
+void poll_video(SwapchainData &sc, bool wait_image, uint32_t image) {
+  auto &vt = sc.dev->vtable;
+  Runtime &rt = Runtime::get();
+  while (!sc.video_inflight.empty()) {
+    const VideoInflight v = sc.video_inflight.front();
+    const VkFence f = sc.fences[v.image];
+    VkResult r = vt.GetFenceStatus(sc.dev->device, f);
+    if (r == VK_NOT_READY && wait_image && v.image == image)
+      r = vt.WaitForFences(sc.dev->device, 1, &f, VK_TRUE, 1'000'000'000ull);
+    if (r != VK_SUCCESS) return;
+    sc.video_inflight.pop_front();
+    sc.video_busy[v.staging] = false;
+    const uint32_t w = sc.extent.width, h = sc.extent.height;
+    read_host_buffer(*sc.dev, sc.video[v.staging], [&](const uint8_t *ptr) {
+      rt.video_write(ptr, w, h, w * 4, uint32_t(sc.format), 0, v.present_ns);
+    });
+  }
+}
+
+void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image, VkBuffer dst) {
   auto &vt = sc.dev->vtable;
   VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -390,7 +439,7 @@ void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image) {
   VkBufferImageCopy region{};
   region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   region.imageExtent = {sc.extent.width, sc.extent.height, 1};
-  vt.CmdCopyImageToBuffer(cb, sc.images[image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc.cap_buffer, 1, &region);
+  vt.CmdCopyImageToBuffer(cb, sc.images[image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, 1, &region);
   std::swap(b.oldLayout, b.newLayout);
   b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
   b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
@@ -400,7 +449,7 @@ void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image) {
   bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
   bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  bb.buffer = sc.cap_buffer;
+  bb.buffer = dst;
   bb.size = VK_WHOLE_SIZE;
   vt.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bb, 0,
                         nullptr);
@@ -700,6 +749,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
   VkSemaphore signal = VK_NULL_HANDLE;
   SwapchainData *fence_owner = nullptr;
   uint32_t fence_image = 0;
+  bool video_pushed = false;
 
   for (uint32_t i = 0; i < pi->swapchainCount; ++i) {
     SwapchainData *sc;
@@ -715,7 +765,8 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
     if (res.capture) sc->cap_waiting.push_back(*res.capture);
 
     if (sc->ready && !sc->cap_inflight.empty()) poll_captures(*sc, false, 0);
-    if (!res.draw && sc->cap_waiting.empty()) continue;
+    if (sc->ready && !sc->video_inflight.empty()) poll_video(*sc, false, 0);
+    if (!res.draw && sc->cap_waiting.empty() && !res.video) continue;
 
     if (!sc->init_tried || (sc->ready && sc->family != family)) {
       if (sc->ready) destroy_resources(*sc);
@@ -741,6 +792,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
     auto &vt = d->vtable;
     if (sc->fence_in_flight[image]) {
       poll_captures(*sc, true, image);
+      poll_video(*sc, true, image);
       if (vt.WaitForFences(d->device, 1, &sc->fences[image], VK_TRUE, 100'000'000ull) != VK_SUCCESS) continue;
       sc->fence_in_flight[image] = false;
     }
@@ -753,25 +805,47 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
       cap = sc->cap_waiting.front();
       sc->cap_waiting.pop_front();
       has_cap = (sc->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && bpp != 0 &&
-                ensure_capture_buffer(*sc, VkDeviceSize(sc->extent.width) * sc->extent.height * bpp);
+                ensure_host_buffer(*d, sc->cap, VkDeviceSize(sc->extent.width) * sc->extent.height * bpp);
       if (!has_cap)
         rt.send_capture_error(cap.request_id, bpp == 0 ? "formato de swapchain não suportado para captura"
                                                        : "swapchain não permite cópia da imagem");
     }
+    // Gravação: um buffer livre do anel; sem nenhum (GPU atrasada), o quadro
+    // fica de fora e o daemon repete o anterior.
+    int video_staging = -1;
+    if (res.video) {
+      if (!(sc->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || bpp != 4) {
+        FRAMUX_LOG_ONCE("gravação indisponível neste swapchain (formato %d ou sem cópia da imagem)", int(sc->format));
+      } else {
+        for (uint32_t k = 0; k < kVideoStaging; ++k)
+          if (!sc->video_busy[k]) {
+            if (ensure_host_buffer(*d, sc->video[k], VkDeviceSize(sc->extent.width) * sc->extent.height * 4))
+              video_staging = int(k);
+            break;
+          }
+      }
+    }
     const bool draw = res.draw && sc->can_draw;
-    if (!draw && !has_cap) continue;
+    if (!draw && !has_cap && video_staging < 0) continue;
 
     VkCommandBuffer cb = sc->cmds[image];
     vt.ResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vt.BeginCommandBuffer(cb, &bi);
-    if (has_cap && !cap.include_overlay) copy_to_buffer(*sc, cb, image);
+    // O vídeo sai sem o contador, como o screenshot padrão.
+    if (video_staging >= 0) copy_to_buffer(*sc, cb, image, sc->video[video_staging].buffer);
+    if (has_cap && !cap.include_overlay) copy_to_buffer(*sc, cb, image, sc->cap.buffer);
     if (draw) draw_overlay(*sc, cb, image, *res.draw);
-    if (has_cap && cap.include_overlay) copy_to_buffer(*sc, cb, image);
+    if (has_cap && cap.include_overlay) copy_to_buffer(*sc, cb, image, sc->cap.buffer);
     vt.EndCommandBuffer(cb);
 
     if (has_cap) sc->cap_inflight.push_back({cap, image, present_ns});
+    if (video_staging >= 0) {
+      sc->video_busy[video_staging] = true;
+      sc->video_inflight.push_back({uint32_t(video_staging), image, present_ns});
+      video_pushed = true;
+    }
     cmds.push_back(cb);
     submit_fence = sc->fences[image];
     signal = sc->semaphores[image];
@@ -793,6 +867,10 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
   if (d->vtable.QueueSubmit(queue, 1, &si, submit_fence) != VK_SUCCESS) {
     FRAMUX_LOG_ONCE("vkQueueSubmit do overlay falhou; quadro apresentado sem overlay");
     fence_owner->cap_inflight.clear();
+    if (video_pushed) {
+      fence_owner->video_busy[fence_owner->video_inflight.back().staging] = false;
+      fence_owner->video_inflight.pop_back();
+    }
     return d->vtable.QueuePresentKHR(queue, pi);
   }
   fence_owner->fence_in_flight[fence_image] = true;
