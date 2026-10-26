@@ -1,0 +1,70 @@
+// Gravação: RGB do swapchain (já copiado para um buffer na GPU) → NV12
+// BT.709 de faixa limitada, opcionalmente na metade do tamanho. A camada
+// então lê da GPU 1,5 byte por pixel em vez de 4 e o daemon não converte
+// nada no processador.
+//
+// Cada invocação escreve um bloco de 4×2 pixels: duas palavras de Y e uma
+// de UV (dois pares U,V). Pixels além da imagem repetem a borda.
+//
+// Regerar o SPIR-V embutido (rgb_to_nv12.spv.h) depois de mudar este arquivo
+// (pacote glslang; o build não precisa dele):
+//   glslangValidator -V --target-env vulkan1.0 --vn kRgbToNv12Spv -o src/layer/rgb_to_nv12.spv.h src/layer/rgb_to_nv12.comp
+//   clang-format -i src/layer/rgb_to_nv12.spv.h
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint px[]; } src;
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint data[]; } dst;
+
+layout(push_constant) uniform Params {
+  uint src_w, src_h;  // imagem do jogo
+  uint out_w, out_h;  // vídeo (pares)
+  uint stride;        // bytes por linha de Y e de UV (múltiplo de 4, ≥ out_w)
+  uint scale;         // 1 ou 2
+  uint bgr;           // 1: bytes B,G,R,A na memória
+} p;
+
+vec3 fetch(uint x, uint y) {
+  const uint v = src.px[min(y, p.src_h - 1u) * p.src_w + min(x, p.src_w - 1u)];
+  const vec3 c = vec3(float(v & 255u), float((v >> 8) & 255u), float((v >> 16) & 255u));
+  return p.bgr != 0u ? c.bgr : c;
+}
+
+// Pixel (x, y) do vídeo, em RGB 0–255.
+vec3 rgb(uint x, uint y) {
+  x = min(x, p.out_w - 1u);
+  y = min(y, p.out_h - 1u);
+  if (p.scale == 1u) return fetch(x, y);
+  const uint sx = x * 2u, sy = y * 2u;
+  return (fetch(sx, sy) + fetch(sx + 1u, sy) + fetch(sx, sy + 1u) + fetch(sx + 1u, sy + 1u)) * 0.25;
+}
+
+float luma(vec3 c) { return 16.0 + dot(c, vec3(0.2126, 0.7152, 0.0722)) * (219.0 / 255.0); }
+float cb(vec3 c) { return 128.0 + dot(c, vec3(-0.114572, -0.385428, 0.5)) * (224.0 / 255.0); }
+float cr(vec3 c) { return 128.0 + dot(c, vec3(0.5, -0.454153, -0.045847)) * (224.0 / 255.0); }
+
+uint pack4(vec4 v) {
+  const uvec4 u = uvec4(clamp(floor(v + 0.5), 0.0, 255.0));
+  return u.x | (u.y << 8) | (u.z << 16) | (u.w << 24);
+}
+
+void main() {
+  const uint x0 = gl_GlobalInvocationID.x * 4u;
+  const uint y0 = gl_GlobalInvocationID.y * 2u;
+  if (x0 >= p.stride || y0 >= p.out_h) return;
+
+  vec3 top[4], bottom[4];
+  for (uint i = 0u; i < 4u; ++i) {
+    top[i] = rgb(x0 + i, y0);
+    bottom[i] = rgb(x0 + i, y0 + 1u);
+  }
+  dst.data[(y0 * p.stride + x0) / 4u] = pack4(vec4(luma(top[0]), luma(top[1]), luma(top[2]), luma(top[3])));
+  dst.data[((y0 + 1u) * p.stride + x0) / 4u] =
+      pack4(vec4(luma(bottom[0]), luma(bottom[1]), luma(bottom[2]), luma(bottom[3])));
+
+  // Croma 4:2:0: média de cada quadrado 2×2.
+  const vec3 a = (top[0] + top[1] + bottom[0] + bottom[1]) * 0.25;
+  const vec3 b = (top[2] + top[3] + bottom[2] + bottom[3]) * 0.25;
+  dst.data[(p.stride * p.out_h + (y0 / 2u) * p.stride + x0) / 4u] = pack4(vec4(cb(a), cr(a), cb(b), cr(b)));
+}

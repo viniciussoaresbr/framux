@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "client/runtime.h"
+#include "common/ipc_proto.h"
 #include "common/log.h"
 
 #define FRAMUX_EXPORT extern "C" __attribute__((visibility("default")))
@@ -39,6 +40,9 @@ namespace framux::vk {
 using client::Runtime;
 
 namespace {
+
+// SPIR-V de rgb_to_nv12.comp (gerado; ver o comentário no .comp).
+#include "layer/rgb_to_nv12.spv.h"
 
 void *key(const void *dispatchable) { return *(void *const *)dispatchable; }
 
@@ -83,6 +87,26 @@ struct VideoInflight {
   uint32_t staging;
   uint32_t image;
   uint64_t present_ns;
+  uint32_t width, height, stride, vk_format, flags;  // como vai ao daemon
+};
+
+// Gravação em NV12: o RGB do swapchain vai para um buffer na GPU e um compute
+// shader escreve o NV12 (1,5 byte por pixel, opcionalmente na metade do
+// tamanho) no buffer host-visible que a camada lê.
+struct YuvPipe {
+  bool tried = false, ok = false;
+  VkShaderModule module = VK_NULL_HANDLE;
+  VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  VkDescriptorSet sets[kVideoStaging] = {};
+  VkBuffer bound[kVideoStaging] = {};  // saída ligada a cada set
+  HostBuffer rgb;                      // memória da GPU, não do host
+};
+
+struct YuvParams {  // push constants de rgb_to_nv12.comp
+  uint32_t src_w, src_h, out_w, out_h, stride, scale, bgr;
 };
 
 struct SwapchainData {
@@ -115,6 +139,7 @@ struct SwapchainData {
   HostBuffer video[kVideoStaging];
   bool video_busy[kVideoStaging] = {};
   std::deque<VideoInflight> video_inflight;
+  YuvPipe yuv;
 };
 
 std::mutex g_mu;
@@ -153,6 +178,14 @@ uint32_t bytes_per_pixel(VkFormat f) {
 }
 
 int32_t find_memory_type(const DeviceData &d, uint32_t bits, VkMemoryPropertyFlags want, bool *coherent) {
+  if (!(want & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {  // memória da GPU
+    for (uint32_t i = 0; i < d.mem_props.memoryTypeCount; ++i)
+      if ((bits & (1u << i)) && (d.mem_props.memoryTypes[i].propertyFlags & want) == want) {
+        *coherent = false;
+        return int32_t(i);
+      }
+    return -1;
+  }
   for (int pass = 0; pass < 2; ++pass) {
     const VkMemoryPropertyFlags flags =
         pass == 0 ? want | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT : want;
@@ -192,6 +225,14 @@ void destroy_resources(SwapchainData &sc) {
   if (sc.pool) vt.DestroyCommandPool(d.device, sc.pool, nullptr);
   free_host_buffer(d, sc.cap);
   for (HostBuffer &b : sc.video) free_host_buffer(d, b);
+  YuvPipe &y = sc.yuv;
+  if (y.pipeline) vt.DestroyPipeline(d.device, y.pipeline, nullptr);
+  if (y.layout) vt.DestroyPipelineLayout(d.device, y.layout, nullptr);
+  if (y.pool) vt.DestroyDescriptorPool(d.device, y.pool, nullptr);
+  if (y.set_layout) vt.DestroyDescriptorSetLayout(d.device, y.set_layout, nullptr);
+  if (y.module) vt.DestroyShaderModule(d.device, y.module, nullptr);
+  free_host_buffer(d, y.rgb);
+  y = YuvPipe{};
   for (bool &b : sc.video_busy) b = false;
   sc.video_inflight.clear();
   sc.fences.clear();
@@ -310,19 +351,23 @@ bool init_resources(SwapchainData &sc, uint32_t family) {
   return true;
 }
 
-bool ensure_host_buffer(DeviceData &d, HostBuffer &b, VkDeviceSize size) {
+// Buffer de `size` bytes, host-visible (leitura pela CPU) ou na memória da
+// GPU (`host` = false). Os de gravação também servem de storage buffer.
+bool ensure_buffer(DeviceData &d, HostBuffer &b, VkDeviceSize size, bool host = true) {
   if (b.buffer && b.size >= size) return true;
   auto &vt = d.vtable;
   free_host_buffer(d, b);
 
   VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bci.size = size;
-  bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   if (vt.CreateBuffer(d.device, &bci, nullptr, &b.buffer) != VK_SUCCESS) return false;
   VkMemoryRequirements req;
   vt.GetBufferMemoryRequirements(d.device, b.buffer, &req);
-  const int32_t type = find_memory_type(d, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, &b.coherent);
+  const int32_t type =
+      find_memory_type(d, req.memoryTypeBits,
+                       host ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &b.coherent);
   VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
   mai.allocationSize = req.size;
   mai.memoryTypeIndex = uint32_t(type);
@@ -417,14 +462,17 @@ void poll_video(SwapchainData &sc, bool wait_image, uint32_t image) {
     if (r != VK_SUCCESS) return;
     sc.video_inflight.pop_front();
     sc.video_busy[v.staging] = false;
-    const uint32_t w = sc.extent.width, h = sc.extent.height;
+    const uint64_t t0 = now_ns();
     read_host_buffer(*sc.dev, sc.video[v.staging], [&](const uint8_t *ptr) {
-      rt.video_write(ptr, w, h, w * 4, uint32_t(sc.format), 0, v.present_ns);
+      rt.video_write(ptr, v.width, v.height, v.stride, v.vk_format, v.flags, v.present_ns);
     });
+    rt.add_video_cost(now_ns() - t0);
   }
 }
 
-void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image, VkBuffer dst) {
+// Copia a imagem para `dst`; `for_host`: deixa o buffer pronto para a CPU
+// ler (senão, o chamador põe a barreira para o próximo uso na GPU).
+void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image, VkBuffer dst, bool for_host = true) {
   auto &vt = sc.dev->vtable;
   VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
@@ -445,6 +493,7 @@ void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image, VkBuf
   b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
   vt.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
                         nullptr, 1, &b);
+  if (!for_host) return;
   VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
   bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -452,6 +501,116 @@ void copy_to_buffer(SwapchainData &sc, VkCommandBuffer cb, uint32_t image, VkBuf
   bb.buffer = dst;
   bb.size = VK_WHOLE_SIZE;
   vt.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bb, 0,
+                        nullptr);
+}
+
+// Pipeline de compute da conversão para NV12; false (uma vez) se a fila ou
+// o driver não permitirem: a gravação segue em RGB.
+bool init_yuv(SwapchainData &sc) {
+  YuvPipe &y = sc.yuv;
+  if (y.tried) return y.ok;
+  y.tried = true;
+  DeviceData &d = *sc.dev;
+  auto &vt = d.vtable;
+  const VkQueueFlags qf = sc.family < d.families.size() ? d.families[sc.family].queueFlags : 0;
+  if (!(qf & VK_QUEUE_COMPUTE_BIT)) {
+    FRAMUX_LOG_ONCE("gravação: fila sem compute; conversão de cor fica no daemon");
+    return false;
+  }
+  VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+  smci.codeSize = sizeof kRgbToNv12Spv;
+  smci.pCode = kRgbToNv12Spv;
+  VkDescriptorSetLayoutBinding binds[2]{};
+  for (uint32_t i = 0; i < 2; ++i) {
+    binds[i].binding = i;
+    binds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    binds[i].descriptorCount = 1;
+    binds[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  }
+  VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  dslci.bindingCount = 2;
+  dslci.pBindings = binds;
+  VkPushConstantRange pcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(YuvParams)};
+  VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  plci.setLayoutCount = 1;
+  plci.pSetLayouts = &y.set_layout;
+  plci.pushConstantRangeCount = 1;
+  plci.pPushConstantRanges = &pcr;
+  VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kVideoStaging};
+  VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  dpci.maxSets = kVideoStaging;
+  dpci.poolSizeCount = 1;
+  dpci.pPoolSizes = &ps;
+  bool ok = vt.CreateShaderModule(d.device, &smci, nullptr, &y.module) == VK_SUCCESS &&
+            vt.CreateDescriptorSetLayout(d.device, &dslci, nullptr, &y.set_layout) == VK_SUCCESS &&
+            vt.CreatePipelineLayout(d.device, &plci, nullptr, &y.layout) == VK_SUCCESS &&
+            vt.CreateDescriptorPool(d.device, &dpci, nullptr, &y.pool) == VK_SUCCESS;
+  if (ok) {
+    VkComputePipelineCreateInfo cpci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cpci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpci.stage.module = y.module;
+    cpci.stage.pName = "main";
+    cpci.layout = y.layout;
+    VkDescriptorSetLayout layouts[kVideoStaging];
+    std::fill(std::begin(layouts), std::end(layouts), y.set_layout);
+    VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dsai.descriptorPool = y.pool;
+    dsai.descriptorSetCount = kVideoStaging;
+    dsai.pSetLayouts = layouts;
+    ok = vt.CreateComputePipelines(d.device, VK_NULL_HANDLE, 1, &cpci, nullptr, &y.pipeline) == VK_SUCCESS &&
+         vt.AllocateDescriptorSets(d.device, &dsai, y.sets) == VK_SUCCESS &&
+         ensure_buffer(d, y.rgb, VkDeviceSize(sc.extent.width) * sc.extent.height * 4, false);
+  }
+  if (!ok) {
+    FRAMUX_LOG_ONCE("gravação: conversão de cor na GPU indisponível; fica no daemon");
+    return false;
+  }
+  y.ok = true;
+  return true;
+}
+
+// Grava em `cb`: imagem → buffer RGB na GPU → compute → NV12 em video[k].
+void record_nv12(SwapchainData &sc, VkCommandBuffer cb, uint32_t image, uint32_t k, const YuvParams &prm) {
+  DeviceData &d = *sc.dev;
+  auto &vt = d.vtable;
+  YuvPipe &y = sc.yuv;
+  if (y.bound[k] != sc.video[k].buffer) {  // o set k não está em uso: video_busy[k] era false
+    VkDescriptorBufferInfo bi[2] = {{y.rgb.buffer, 0, VK_WHOLE_SIZE}, {sc.video[k].buffer, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[2]{};
+    for (uint32_t i = 0; i < 2; ++i) {
+      w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      w[i].dstSet = y.sets[k];
+      w[i].dstBinding = i;
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      w[i].pBufferInfo = &bi[i];
+    }
+    vt.UpdateDescriptorSets(d.device, 2, w, 0, nullptr);
+    y.bound[k] = sc.video[k].buffer;
+  }
+  VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  bb.srcQueueFamilyIndex = bb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  bb.size = VK_WHOLE_SIZE;
+  // O quadro anterior pode ainda estar lendo o buffer RGB no compute.
+  bb.buffer = y.rgb.buffer;
+  bb.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  bb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  vt.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &bb,
+                        0, nullptr);
+  copy_to_buffer(sc, cb, image, y.rgb.buffer, false);
+  bb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  bb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  vt.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &bb,
+                        0, nullptr);
+  vt.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, y.pipeline);
+  vt.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, y.layout, 0, 1, &y.sets[k], 0, nullptr);
+  vt.CmdPushConstants(cb, y.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof prm, &prm);
+  vt.CmdDispatch(cb, (prm.stride / 4 + 7) / 8, (prm.out_h / 2 + 7) / 8, 1);
+  bb.buffer = sc.video[k].buffer;
+  bb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  bb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  vt.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bb, 0,
                         nullptr);
 }
 
@@ -805,7 +964,7 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
       cap = sc->cap_waiting.front();
       sc->cap_waiting.pop_front();
       has_cap = (sc->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && bpp != 0 &&
-                ensure_host_buffer(*d, sc->cap, VkDeviceSize(sc->extent.width) * sc->extent.height * bpp);
+                ensure_buffer(*d, sc->cap, VkDeviceSize(sc->extent.width) * sc->extent.height * bpp);
       if (!has_cap)
         rt.send_capture_error(cap.request_id, bpp == 0 ? "formato de swapchain não suportado para captura"
                                                        : "swapchain não permite cópia da imagem");
@@ -813,14 +972,33 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
     // Gravação: um buffer livre do anel; sem nenhum (GPU atrasada), o quadro
     // fica de fora e o daemon repete o anterior.
     int video_staging = -1;
+    VideoInflight vin{};
+    YuvParams yuv{};
+    bool use_yuv = false;
     if (res.video) {
       if (!(sc->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || bpp != 4) {
         FRAMUX_LOG_ONCE("gravação indisponível neste swapchain (formato %d ou sem cópia da imagem)", int(sc->format));
       } else {
+        const uint32_t w = sc->extent.width, h = sc->extent.height;
+        const uint32_t mode = rt.video_mode();
+        const bool bgr = sc->format == VK_FORMAT_B8G8R8A8_UNORM || sc->format == VK_FORMAT_B8G8R8A8_SRGB;
+        const bool rgba8 = bgr || sc->format == VK_FORMAT_R8G8B8A8_UNORM || sc->format == VK_FORMAT_R8G8B8A8_SRGB ||
+                           sc->format == VK_FORMAT_A8B8G8R8_UNORM_PACK32 ||
+                           sc->format == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+        const uint32_t scale = mode & ipc::kVideoHalf ? 2 : 1;
+        const uint32_t ow = (w / scale) & ~1u, oh = (h / scale) & ~1u;
+        use_yuv = (mode & ipc::kVideoYuv) && rgba8 && ow >= 16 && oh >= 16 && init_yuv(*sc);
+        if (use_yuv) {
+          const uint32_t stride = (ow + 3) & ~3u;
+          yuv = {w, h, ow, oh, stride, scale, bgr ? 1u : 0u};
+          vin = {0, image, present_ns, ow, oh, stride, ipc::kVkFormatNv12, scale == 2 ? uint32_t(ipc::kImgHalved) : 0};
+        } else {
+          vin = {0, image, present_ns, w, h, w * 4, uint32_t(sc->format), 0};
+        }
+        const VkDeviceSize size = use_yuv ? VkDeviceSize(vin.stride) * vin.height * 3 / 2 : VkDeviceSize(w) * h * 4;
         for (uint32_t k = 0; k < kVideoStaging; ++k)
           if (!sc->video_busy[k]) {
-            if (ensure_host_buffer(*d, sc->video[k], VkDeviceSize(sc->extent.width) * sc->extent.height * 4))
-              video_staging = int(k);
+            if (ensure_buffer(*d, sc->video[k], size)) video_staging = int(k);
             break;
           }
       }
@@ -834,7 +1012,12 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vt.BeginCommandBuffer(cb, &bi);
     // O vídeo sai sem o contador, como o screenshot padrão.
-    if (video_staging >= 0) copy_to_buffer(*sc, cb, image, sc->video[video_staging].buffer);
+    if (video_staging >= 0) {
+      if (use_yuv)
+        record_nv12(*sc, cb, image, uint32_t(video_staging), yuv);
+      else
+        copy_to_buffer(*sc, cb, image, sc->video[video_staging].buffer);
+    }
     if (has_cap && !cap.include_overlay) copy_to_buffer(*sc, cb, image, sc->cap.buffer);
     if (draw) draw_overlay(*sc, cb, image, *res.draw);
     if (has_cap && cap.include_overlay) copy_to_buffer(*sc, cb, image, sc->cap.buffer);
@@ -843,7 +1026,8 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
     if (has_cap) sc->cap_inflight.push_back({cap, image, present_ns});
     if (video_staging >= 0) {
       sc->video_busy[video_staging] = true;
-      sc->video_inflight.push_back({uint32_t(video_staging), image, present_ns});
+      vin.staging = uint32_t(video_staging);
+      sc->video_inflight.push_back(vin);
       video_pushed = true;
     }
     cmds.push_back(cb);
