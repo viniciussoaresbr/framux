@@ -1,5 +1,6 @@
 // framuxd (§C.3.3): sessões por jogo, ring de timestamps, benchmark,
-// screenshots, hotkeys, API D-Bus e exportação pública de estatísticas.
+// screenshots, gravação, hotkeys, API D-Bus e exportação pública de
+// estatísticas.
 // Loop único com epoll; codificação e escrita em disco na thread Worker.
 #pragma once
 
@@ -17,9 +18,12 @@
 #include "common/ipc_proto.h"
 #include "common/ipc_socket.h"
 #include "common/ring.h"
+#include "common/video_ring.h"
 #include "core/arbiter.h"
 #include "core/bench_files.h"
 #include "daemon/dbus_service.h"
+#include "daemon/game_audio.h"
+#include "daemon/recorder.h"
 #include "daemon/worker.h"
 
 struct framux_stats;
@@ -34,6 +38,15 @@ struct Benchmark {
   uint32_t limit_s = 0;
   uint32_t swapchain = 0;  // 0 = escolher no primeiro quadro
   std::vector<BenchFrame> frames;
+};
+
+// Mapeamento do buffer de quadros de uma geração (video_ring.h). Os quadros
+// na fila do Recorder seguram uma referência: o buffer só some depois deles.
+struct VideoMap {
+  VideoRingHeader *ring = nullptr;
+  size_t size = 0;
+  uint32_t generation = 0;
+  ~VideoMap();
 };
 
 struct SwapStat {
@@ -63,6 +76,13 @@ struct Session {
   ipc::Corner corner = ipc::Corner::TopLeft;
   std::optional<Benchmark> bench;
   uint64_t next_repeat_shot_ns = 0;  // 0 = repetição desligada
+  int peer_pid = 0;                  // SO_PEERCRED (no Flatpak difere de hello.pid)
+
+  // Gravação (§B.7)
+  std::shared_ptr<Recorder> rec;
+  std::unique_ptr<GameAudio> audio;
+  std::shared_ptr<VideoMap> video_map;
+  uint64_t rec_start_ns = 0;
 
   uint32_t primary_swapchain() const;
   const SwapStat *primary() const;
@@ -93,6 +113,8 @@ class Daemon {
   void handle_hello(Session &s, const ipc::Message &m);
   void handle_message(Session &s, ipc::Message &m);
   void handle_frame_image(Session &s, ipc::Message &m);
+  void handle_video_buffer(Session &s, ipc::Message &m);
+  void handle_video_frame(Session &s, const ipc::Message &m);
 
   void tick();
   void drain(Session &s);
@@ -106,6 +128,11 @@ class Daemon {
   void bench_stop(Session &s, bool final_write_sync = false);
   ActionResult request_shot(Session *s, std::optional<bool> include_overlay, bool via_dbus);
   ActionResult overlay_action(Session *s, const std::string &action);
+  ActionResult video_action(Session *s, const std::string &action);
+  ActionResult video_start(Session &s);
+  // Para a gravação; a finalização (flush, trailer, MP4) vai para o worker.
+  void video_stop(Session &s, bool tell_layer);
+  void start_encoder_probe();
   void send_indicators(Session &s, uint32_t event_flags, float bench_result = 0);
   void send_overlay(Session &s);
 
@@ -140,6 +167,10 @@ class Daemon {
   MainQueue main_queue_;
   std::unique_ptr<X11Hotkeys> x11_;
   std::unique_ptr<DbusService> dbus_;
+
+  // Encoders detectados por `framuxd --probe-encoders` (processo filho).
+  bool encoders_probed_ = false;
+  EncoderProbe encoders_;
 
   framux_stats *stats_ = nullptr;
   uint64_t last_stats_signal_ns_ = 0;

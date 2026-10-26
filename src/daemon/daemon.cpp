@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
@@ -10,10 +11,13 @@
 #include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cinttypes>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <sstream>
 
@@ -77,6 +81,10 @@ ActionResult no_session() {
 }
 
 }  // namespace
+
+VideoMap::~VideoMap() {
+  if (ring) munmap(ring, size);
+}
 
 uint32_t Session::primary_swapchain() const {
   uint32_t best = 0, best_fps = 0;
@@ -210,9 +218,10 @@ int Daemon::run(int listen_fd) {
     return request_shot(active_session(), overlay ? std::optional<bool>(true) : std::nullopt, true);
   };
   h.overlay = [this](const std::string &a) { return overlay_action(active_session(), a); };
-  h.video = [](const std::string &, const std::string &) {
+  h.video = [this](const std::string &what, const std::string &action) {
+    if (what == "record") return video_action(active_session(), action);
     return ActionResult{false, "io.github.framux.Error.NotSupported",
-                        "gravação de vídeo e loop ainda não estão disponíveis nesta versão"};
+                        "loop recording ainda não está disponível nesta versão"};
   };
   h.reload = [this] { reload_config(); };
   dbus_ = DbusService::open(std::move(h), &already);
@@ -253,6 +262,7 @@ int Daemon::run(int listen_fd) {
   if (dbus_) ep_add(epfd_, dbus_->fd(), kTagDbus, dbus_->events());
 
   resolve_hotkey_backend();
+  start_encoder_probe();
 
   if (global_cfg_.stats_export.enabled) {
     const std::string path = stats_path();
@@ -322,9 +332,12 @@ int Daemon::run(int listen_fd) {
   }
 
   FRAMUX_LOG("encerrando");
-  // Fecha benchmarks em andamento antes de sair (arquivos completos).
-  for (auto &[id, s] : sessions_)
+  // Fecha benchmarks e gravações em andamento antes de sair (arquivos
+  // completos; o worker termina os pendentes no stop()).
+  for (auto &[id, s] : sessions_) {
     if (s->bench) bench_stop(*s, true);
+    if (s->rec) video_stop(*s, true);
+  }
   worker_.stop();
   main_queue_.run_pending();
   return 0;
@@ -347,6 +360,7 @@ void Daemon::accept_clients() {
     auto s = std::make_unique<Session>();
     s->id = next_session_id_++;
     s->fd = fd;
+    s->peer_pid = cred.pid;
     fd_session_[fd] = s->id;
     ep_add(epfd_, fd, uint64_t(fd));
     sessions_[s->id] = std::move(s);
@@ -394,6 +408,7 @@ void Daemon::close_session(uint64_t id, const char *why) {
   // A memória do ring continua válida aqui mesmo com o jogo morto: drena e
   // fecha o benchmark com tudo o que foi apresentado (§C.12 teste 5).
   if (s.bench) bench_stop(s);
+  if (s.rec) video_stop(s, false);  // o que já chegou vira um arquivo válido
   if (s.hello_done) FRAMUX_LOG("sessão %" PRIu64 " (%s, pid %d) encerrada: %s", id, s.game.c_str(), s.hello.pid, why);
   epoll_ctl(epfd_, EPOLL_CTL_DEL, s.fd, nullptr);
   close(s.fd);
@@ -490,6 +505,8 @@ void Daemon::handle_message(Session &s, ipc::Message &m) {
       }
       break;
     case ipc::MsgType::FrameImage: handle_frame_image(s, m); break;
+    case ipc::MsgType::VideoBuffer: handle_video_buffer(s, m); break;
+    case ipc::MsgType::VideoFrame: handle_video_frame(s, m); break;
     case ipc::MsgType::Error:
       if (const auto *e = m.as<ipc::ErrorMsg>()) {
         const std::string msg = cstr(e->message, sizeof e->message);
@@ -580,6 +597,56 @@ void Daemon::handle_frame_image(Session &s, ipc::Message &m) {
   });
 }
 
+// Novo buffer de quadros da camada (início da gravação ou janela maior).
+void Daemon::handle_video_buffer(Session &s, ipc::Message &m) {
+  const auto *vb = m.as<ipc::VideoBuffer>();
+  if (!vb || m.nfds < 1) return;
+  const int fd = m.take_fd(0);
+  struct stat st;
+  void *map = MAP_FAILED;
+  // Validação (§C.11.2): memfd regular, cabeçalho coerente com o tamanho.
+  if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && size_t(st.st_size) > kVideoRingDataOffset &&
+      size_t(st.st_size) <= (size_t(1) << 32))
+    map = mmap(nullptr, size_t(st.st_size), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (map == MAP_FAILED) {
+    FRAMUX_LOG("%s: buffer de vídeo inválido", s.game.c_str());
+    return;
+  }
+  auto vm = std::make_shared<VideoMap>();
+  vm->ring = static_cast<VideoRingHeader *>(map);
+  vm->size = size_t(st.st_size);
+  vm->generation = vb->generation;
+  const VideoRingHeader &h = *vm->ring;
+  if (h.magic != kVideoRingMagic || h.slot_count != kVideoSlots || h.slot_bytes == 0 ||
+      video_ring_bytes(h.slot_bytes) > vm->size) {
+    FRAMUX_LOG("%s: cabeçalho do buffer de vídeo inválido", s.game.c_str());
+    return;
+  }
+  s.video_map = std::move(vm);
+}
+
+void Daemon::handle_video_frame(Session &s, const ipc::Message &m) {
+  const auto *vf = m.as<ipc::VideoFrame>();
+  std::shared_ptr<VideoMap> vm = s.video_map;
+  if (!vf || !vm || vf->generation != vm->generation || vf->slot >= kVideoSlots) return;
+  auto release = [vm, slot = vf->slot] { vm->ring->state[slot].store(kSlotFree, std::memory_order_release); };
+  const uint64_t need = uint64_t(vf->stride) * vf->height;
+  if (vf->width == 0 || vf->height == 0 || vf->width > 16384 || vf->height > 16384 ||
+      vf->stride < uint64_t(vf->width) * 4 || need > vm->ring->slot_bytes || vk_format_bpp(vf->vk_format) != 4) {
+    FRAMUX_LOG_ONCE("%s: quadro de vídeo inválido descartado", s.game.c_str());
+    release();
+    return;
+  }
+  if (!s.rec) {  // chegou depois do VIDEO_STOP
+    release();
+    return;
+  }
+  if (vf->dropped) s.rec->add_layer_drops(vf->dropped);
+  s.rec->push_video(video_slot(vm->ring, vf->slot), vf->width, vf->height, vf->stride, vf->vk_format,
+                    vf->flags & ipc::kImgFlipY, vf->present_ns, std::move(release));
+}
+
 // ---------------------------------------------------------------------------
 // Ring, estatísticas e sessão ativa
 
@@ -613,7 +680,7 @@ void Daemon::update_active() {
   const uint64_t now = now_ns();
   for (const auto &[id, s] : sessions_) {
     if (!s->hello_done) continue;
-    views.push_back({id, s->focus, s->last_present_ns, s->bench.has_value()});
+    views.push_back({id, s->focus, s->last_present_ns, s->bench.has_value() || s->rec});
   }
   arbiter_.update(views, now);
 }
@@ -631,6 +698,7 @@ void Daemon::tick() {
     drain(*s);
     if (s->bench && s->bench->limit_s && now - s->bench->start_ns >= uint64_t(s->bench->limit_s) * kNsPerSec)
       bench_stop(*s);
+    if (s->rec && s->rec->failed()) video_stop(*s, true);
     if (s->next_repeat_shot_ns && now >= s->next_repeat_shot_ns) {
       s->next_repeat_shot_ns = now + uint64_t(s->cfg.screenshot.repeat_every_s * 1e9);
       request_shot(s.get(), std::nullopt, false);
@@ -664,6 +732,7 @@ void Daemon::update_stats_export() {
   const float fps = live ? float(p->fps.fps()) : 0.0f;
   uint32_t flags = 0;
   if (s && s->bench) flags |= FRAMUX_STATS_BENCHMARK;
+  if (s && s->rec) flags |= FRAMUX_STATS_RECORDING;
 
   if (stats_ && now - last_stats_write_ns_ >= 100 * kNsPerMs) {
     last_stats_write_ns_ = now;
@@ -694,7 +763,8 @@ void Daemon::update_stats_export() {
 // Ações
 
 void Daemon::send_indicators(Session &s, uint32_t event_flags, float bench_result) {
-  ipc::SetIndicators ind{now_ns(), event_flags | (s.bench ? uint32_t(ipc::kIndBenchmark) : 0u), bench_result};
+  const uint32_t state = (s.bench ? uint32_t(ipc::kIndBenchmark) : 0u) | (s.rec ? uint32_t(ipc::kIndRecording) : 0u);
+  ipc::SetIndicators ind{now_ns(), event_flags | state, bench_result};
   ipc::send_struct(s.fd, ipc::MsgType::SetIndicators, ind, MSG_DONTWAIT);
 }
 
@@ -739,8 +809,13 @@ void Daemon::on_key(Session *from, uint32_t keysym, uint32_t mods, bool pressed)
       }
       break;
     case kActVideo:
+      if (const ActionResult r = video_action(s, "toggle"); !r.ok) {
+        notify("Gravação falhou", r.message, "dialog-error");
+        send_indicators(*s, ipc::kIndUnavailable);
+      }
+      break;
     case kActLoopSave:
-      FRAMUX_LOG_ONCE("gravação de vídeo ainda não está disponível nesta versão");
+      FRAMUX_LOG_ONCE("loop recording ainda não está disponível nesta versão");
       send_indicators(*s, ipc::kIndUnavailable);
       break;
   }
@@ -873,6 +948,141 @@ ActionResult Daemon::overlay_action(Session *s, const std::string &action) {
   return {true, {}, std::string("overlay: ") + corner_name(s->corner)};
 }
 
+ActionResult Daemon::video_action(Session *s, const std::string &action) {
+  if (!s) return no_session();
+  bool start;
+  if (action == "start")
+    start = true;
+  else if (action == "stop")
+    start = false;
+  else if (action == "toggle")
+    start = !s->rec;
+  else
+    return {false, "org.freedesktop.DBus.Error.InvalidArgs", "ação inválida: " + action};
+  if (start) {
+    if (s->rec) return {false, "io.github.framux.Error.Busy", "já gravando " + s->game};
+    return video_start(*s);
+  }
+  if (!s->rec) return {false, "io.github.framux.Error.NotRunning", "nenhuma gravação em andamento"};
+  video_stop(*s, true);
+  return {true, {}, "gravação encerrada em " + s->game};
+}
+
+ActionResult Daemon::video_start(Session &s) {
+  const Config::Video &v = s.cfg.video;
+  std::string err, path;
+  const std::string folder = expand_path(v.folder);
+  timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  const std::string stem = sanitize_filename(s.game) + " " + file_timestamp(ts.tv_sec, int(ts.tv_nsec / 10'000'000));
+  const int fd = make_dirs(folder, &err) ? create_unique(folder, stem, ".mkv", &path, &err) : -1;
+  if (fd < 0) {
+    FRAMUX_LOG("gravação: %s", err.c_str());
+    return {false, "io.github.framux.Error.Failed", "não consegui criar o arquivo: " + err};
+  }
+  RecorderOptions opt;
+  opt.fd = fd;
+  opt.path = path;
+  opt.game = s.game;
+  opt.fps = v.fps;
+  opt.half = v.scale == "half";
+  opt.encoder = v.encoder;
+  opt.quality = v.quality;
+  opt.to_mp4 = v.container == "mp4";
+  opt.audio = s.cfg.audio.game;
+  opt.available = encoders_.available;
+  s.rec = std::make_shared<Recorder>(std::move(opt));
+  s.rec_start_ns = now_ns();
+  if (s.cfg.audio.game) {
+    std::weak_ptr<Recorder> weak = s.rec;
+    s.audio = GameAudio::start(
+        s.hello.pid, s.peer_pid,
+        [weak](const float *samples, uint32_t frames, uint64_t t) {
+          if (auto r = weak.lock()) r->push_audio(samples, frames, t);
+        },
+        &err);
+    if (!s.audio) FRAMUX_LOG("gravação sem áudio: %s", err.c_str());
+  }
+  ipc::VideoStart vs{s.rec_start_ns, uint32_t(v.fps), 0};
+  ipc::send_struct(s.fd, ipc::MsgType::VideoStart, vs, MSG_DONTWAIT);
+  send_indicators(s, 0);
+  update_active();
+  FRAMUX_LOG("%s: gravação iniciada → %s", s.game.c_str(), path.c_str());
+  return {true, {}, path};
+}
+
+void Daemon::video_stop(Session &s, bool tell_layer) {
+  if (!s.rec) return;
+  if (tell_layer) ipc::send_msg(s.fd, ipc::MsgType::VideoStop, nullptr, 0, nullptr, 0, nullptr, 0, MSG_DONTWAIT);
+  s.audio.reset();  // para de alimentar o Recorder antes de finalizar
+  std::shared_ptr<Recorder> rec = std::move(s.rec);
+  if (tell_layer) send_indicators(s, 0);
+  const std::string game = s.game;
+  FRAMUX_LOG("%s: gravação encerrada; finalizando o arquivo", game.c_str());
+  worker_.post([this, rec, game] {
+    const RecorderResult r = rec->finish();
+    main_queue_.post([this, r, game] {
+      if (!r.ok) {
+        FRAMUX_LOG("gravação de %s falhou: %s", game.c_str(), r.error.c_str());
+        notify("Gravação falhou", r.error, "dialog-error");
+        return;
+      }
+      const int secs = int(std::lround(r.seconds));
+      char body[512];
+      std::snprintf(body, sizeof body, "%s\n%d min %02d s · %.0f MB", r.path.c_str(), secs / 60, secs % 60,
+                    double(r.bytes) / 1e6);
+      FRAMUX_LOG("gravação salva: %s (%.1f s, %" PRIu64 " quadros, %" PRIu64 " repetidos, %" PRIu64 " descartados, %s)",
+                 r.path.c_str(), r.seconds, r.frames, r.duplicated, r.dropped, r.encoder.c_str());
+      if (dbus_) dbus_->emit_file_saved(0, "video", r.path);
+      if (r.error.empty())
+        notify("Gravação salva", body, "video-x-generic");
+      else
+        notify("Gravação interrompida", std::string(body) + "\n" + r.error, "dialog-warning");
+    });
+  });
+}
+
+// Detecta os encoders num processo filho: abrir NVENC/VA-API carrega CUDA e
+// drivers que ficariam residentes no daemon ocioso (§B.10).
+void Daemon::start_encoder_probe() {
+  worker_.post([this] {
+    EncoderProbe probe;
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC) != 0) return;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+    char self[] = "/proc/self/exe";
+    char arg[] = "--probe-encoders";
+    char *argv[] = {self, arg, nullptr};
+    pid_t pid = -1;
+    const int r = posix_spawn(&pid, self, &fa, nullptr, argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    close(pipefd[1]);
+    std::string out;
+    char buf[1024];
+    ssize_t n;
+    while (r == 0 && (n = read(pipefd[0], buf, sizeof buf)) > 0) out.append(buf, size_t(n));
+    close(pipefd[0]);
+    if (r == 0) waitpid(pid, nullptr, 0);
+    std::istringstream in(out);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.rfind("available ", 0) == 0)
+        probe.available.push_back(line.substr(10));
+      else if (line.rfind("missing ", 0) == 0)
+        probe.missing = line.substr(8);
+    }
+    main_queue_.post([this, probe] {
+      encoders_ = probe;
+      encoders_probed_ = true;
+      std::string list;
+      for (const auto &e : probe.available) list += (list.empty() ? "" : ", ") + e;
+      FRAMUX_LOG("encoders de vídeo: %s", list.empty() ? "nenhum" : list.c_str());
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Config, status e notificações
 
@@ -902,7 +1112,9 @@ std::string Daemon::status_text(bool json) {
   std::ostringstream o;
   if (json) {
     o << "{\"version\":" << json_str(FRAMUX_VERSION) << ",\"hotkey_backend\":" << json_str(backend_)
-      << ",\"sessions\":[";
+      << ",\"encoders\":[";
+    for (size_t i = 0; i < encoders_.available.size(); ++i) o << (i ? "," : "") << json_str(encoders_.available[i]);
+    o << "],\"encoders_missing\":" << json_str(encoders_.missing) << ",\"sessions\":[";
     bool first = true;
     for (const auto &[id, s] : sessions_) {
       if (!s->hello_done) continue;
@@ -917,6 +1129,8 @@ std::string Daemon::status_text(bool json) {
         << ",\"fps\":" << (live ? p->fps.fps() : 0) << ",\"frames\":" << s->total_frames
         << ",\"resolution\":" << json_str(p ? std::to_string(p->width) + "x" + std::to_string(p->height) : "")
         << ",\"overlay\":" << json_str(corner_name(s->corner)) << ",\"benchmark\":" << (s->bench ? "true" : "false")
+        << ",\"recording\":" << (s->rec ? "true" : "false")
+        << ",\"recording_s\":" << (s->rec ? (now - s->rec_start_ns) / kNsPerSec : 0)
         << ",\"dropped_records\":" << s->dropped_records + s->lost_records << "}";
       first = false;
     }
@@ -938,6 +1152,7 @@ std::string Daemon::status_text(bool json) {
     if (p) o << " · " << p->width << "x" << p->height;
     o << " · " << s->total_frames << " quadros · overlay " << corner_name(s->corner);
     if (s->bench) o << " · benchmark " << (now - s->bench->start_ns) / kNsPerSec << " s";
+    if (s->rec) o << " · gravando " << (now - s->rec_start_ns) / kNsPerSec << " s";
     if (s->hello.gpu[0]) o << "\n      " << cstr(s->hello.gpu, sizeof s->hello.gpu);
     o << "\n";
   }

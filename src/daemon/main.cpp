@@ -4,25 +4,37 @@
 #include <systemd/sd-daemon.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
 #include "common/flatpak.h"
 #include "common/log.h"
 #include "daemon/daemon.h"
+#include "daemon/recorder.h"
 #include "framux_build_config.h"
 
 int main(int argc, char **argv) {
+  // O SVT-AV1 escreve o banner e a config no stderr a cada encoder aberto.
+  setenv("SVT_LOG", "1", 0);
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--version")) {
       std::printf("framuxd %s\n", FRAMUX_VERSION);
       return 0;
     }
+    if (!std::strcmp(argv[i], "--probe-encoders")) {
+      // Usado pelo próprio daemon (processo filho): uma chave por linha.
+      const framux::daemon::EncoderProbe p = framux::daemon::probe_encoders();
+      for (const auto &k : p.available) std::printf("available %s\n", k.c_str());
+      if (!p.missing.empty()) std::printf("missing %s\n", p.missing.c_str());
+      return 0;
+    }
     if (!std::strcmp(argv[i], "--help") || !std::strcmp(argv[i], "-h")) {
       std::printf(
-          "uso: framuxd [--version]\n\n"
+          "uso: framuxd [--version] [--probe-encoders]\n\n"
           "Daemon do Framux. Normalmente iniciado pelo systemd --user\n"
-          "(framuxd.socket) ou automaticamente por `framux run`.\n");
+          "(framuxd.socket) ou automaticamente por `framux run`.\n\n"
+          "--probe-encoders  lista os encoders de vídeo que funcionam nesta máquina\n");
       return 0;
     }
     std::fprintf(stderr, "framuxd: opção desconhecida: %s\n", argv[i]);
