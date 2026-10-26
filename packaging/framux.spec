@@ -4,7 +4,7 @@
 %bcond tests 0
 
 Name:           framux
-Version:        0.4.1
+Version:        0.4.2
 Release:        1%{?dist}
 Summary:        Contador de FPS, benchmark, screenshots e gravação para jogos no Linux
 License:        MIT
@@ -107,6 +107,18 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.framux.desk
 %{_datadir}/vulkan/implicit_layer.d/framux_*.json
 
 %changelog
+* Sun Oct 25 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.2-1
+- Gravação: linha "medição da gravação" no log ao parar, com o FPS do jogo
+  antes e durante, o custo da cópia na thread do jogo e a CPU do daemon
+- Qualidade constante com teto de taxa por resolução e FPS (H.264 alto em
+  2560x1080 a 60 fps: até 20 Mbit/s, ~150 MB/min); estimativa de tamanho na
+  aba Gravações
+- Automático prefere o codificador da placa (AV1, depois H.264) ao AV1 pelo
+  processador
+- Vulkan: cor convertida para NV12 na GPU (compute shader), já na metade do
+  tamanho se pedido; 60% menos dados copiados por quadro e nenhuma conversão
+  no processador
+
 * Sun Oct 25 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.1-1
 - Gravação: conversão de cor em paralelo e numa thread separada do encoder,
   com fila de quadros; quase nenhum quadro descartado em 2560x1080 a 60 fps
