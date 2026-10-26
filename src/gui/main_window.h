@@ -110,6 +110,7 @@ class MainWindow : public QMainWindow {
   QRadioButton *video_half_ = nullptr;
   QComboBox *video_encoder_ = nullptr;
   QLabel *video_encoder_hint_ = nullptr;
+  QLabel *video_size_hint_ = nullptr;  // estimativa de MB por minuto
   QComboBox *video_quality_ = nullptr;
   QCheckBox *video_mp4_ = nullptr;
   FolderRow *video_folder_ = nullptr;

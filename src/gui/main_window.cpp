@@ -15,6 +15,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -23,6 +24,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScreen>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
@@ -35,6 +37,7 @@
 #include <cstdlib>
 
 #include "common/flatpak.h"
+#include "common/video_rate.h"
 #include "gui/theme.h"
 
 namespace framux::gui {
@@ -450,8 +453,10 @@ constexpr EncoderChoice kEncoders[] = {
     {"x264", "H.264 (processador, x264)"},
     {"utvideo", "Ut Video sem perda (processador)"},
 };
-constexpr const char *kQualities[][2] = {
-    {"low", "Baixa (arquivos menores)"}, {"medium", "Média"}, {"high", "Alta"}, {"lossless", "Sem perda (Ut Video)"}};
+constexpr const char *kQualities[][2] = {{"low", "Baixa (arquivos menores)"},
+                                         {"medium", "Média"},
+                                         {"high", "Alta"},
+                                         {"lossless", "Sem perda (para edição, arquivos enormes)"}};
 
 }  // namespace
 
@@ -525,9 +530,16 @@ QWidget *MainWindow::build_recordings() {
   video_quality_->setObjectName("videoQuality");
   for (const auto &q : kQualities) video_quality_->addItem(q[1], QString(q[0]));
   video_quality_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-  f->addRow("Qualidade", video_quality_);
-  // QFormLayout estica o combo; o alinhamento à esquerda fica no rótulo.
-  f->setAlignment(video_quality_, Qt::AlignLeft);
+  auto *qual = new QWidget(opts);
+  auto *ql = new QVBoxLayout(qual);
+  ql->setContentsMargins(0, 0, 0, 0);
+  ql->setSpacing(4);
+  ql->addWidget(video_quality_, 0, Qt::AlignLeft);
+  video_size_hint_ = hint("", qual);
+  video_size_hint_->setObjectName("videoSizeHint");
+  video_size_hint_->setWordWrap(false);  // uma linha; com quebra o formulário corta o texto
+  ql->addWidget(video_size_hint_);
+  f->addRow("Qualidade", qual);
 
   video_mp4_ = new QCheckBox("Converter para MP4 ao terminar", opts);
   video_mp4_->setObjectName("videoMp4");
@@ -567,12 +579,14 @@ QWidget *MainWindow::build_recordings() {
     if (loading_ || id < 0) return;
     const int n = id == 0 ? video_fps_custom_->value() : id;
     store_.edit([n](Config &c) { c.video.fps = n; });
+    update_encoder_hint();
   };
   connect(video_fps_, &QButtonGroup::idToggled, this, [save_fps](int, bool on) {
     if (on) save_fps();
   });
   connect(video_fps_custom_, &QSpinBox::valueChanged, this, save_fps);
   connect(video_half_, &QRadioButton::toggled, this, [this](bool on) {
+    update_encoder_hint();
     if (!loading_) store_.edit([on](Config &c) { c.video.scale = on ? "half" : "full"; });
   });
   connect(video_encoder_, &QComboBox::currentIndexChanged, this, [this] {
@@ -601,9 +615,11 @@ QWidget *MainWindow::build_recordings() {
 }
 
 void MainWindow::update_encoder_hint() {
-  const bool lossless = video_quality_->currentData().toString() == "lossless";
+  const QString quality = video_quality_->currentData().toString();
+  const bool lossless = quality == "lossless";
   video_encoder_->setEnabled(!lossless);
   QString text;
+  QString used = video_encoder_->currentData().toString();
   if (lossless) {
     text = "Sem perda sempre usa Ut Video: arquivos enormes (5 GB ou mais por minuto em 1080p60) e sempre MKV.";
   } else if (!encoders_.isEmpty()) {
@@ -614,8 +630,7 @@ void MainWindow::update_encoder_hint() {
       const bool ok = value == "auto" || encoders_.contains(value);
       if (model) model->item(i)->setEnabled(ok);
     }
-    const QString cur = video_encoder_->currentData().toString();
-    QString used = cur;
+    const QString cur = used;
     if (cur == "auto") {
       used = encoders_.first();
       text = "Vai usar: " + video_encoder_->itemText(video_encoder_->findData(used)) + ".";
@@ -623,17 +638,32 @@ void MainWindow::update_encoder_hint() {
       used = encoders_.first();
       text = "<span style='color:#e8912d'>Indisponível nesta máquina; a gravação usará o automático.</span>";
     }
-    // ffmpeg-free só decodifica H.264 pelo openh264: 1440p60 em qualidade
-    // alta não chega a tempo real e o vídeo trava no player.
-    if (used == "h264_hw" || used == "x264")
-      text += (text.isEmpty() ? "" : " ") +
-              QString(
-                  "Sem o FFmpeg do RPM Fusion, players do Fedora decodificam H.264 devagar: em resolução alta "
-                  "o vídeo pode travar ao assistir. AV1 toca liso.");
     if (!encoders_missing_.isEmpty()) text += (text.isEmpty() ? "" : " ") + encoders_missing_.toHtmlEscaped();
   }
   video_encoder_hint_->setText(text);
   video_encoder_hint_->setVisible(!text.isEmpty());
+
+  // Estimativa pela tela principal (o jogo costuma estar em tela cheia): o
+  // teto de taxa do gravador, em MB por minuto.
+  QSize px(1920, 1080);
+  if (const QScreen *sc = QGuiApplication::primaryScreen()) px = sc->size() * sc->devicePixelRatio();
+  if (video_half_->isChecked()) px /= 2;
+  const int fps = video_fps_->checkedId() > 0 ? video_fps_->checkedId() : video_fps_custom_->value();
+  const QString where = QString("%1×%2 a %3 fps").arg(px.width()).arg(px.height()).arg(fps);
+  QString size;
+  if (lossless || used == "utvideo") {
+    // Ut Video fica em ~0,6 dos bits do RGB cru em cenas de jogo.
+    const double gb = double(px.width()) * px.height() * 24 * fps * 0.6 / 8 * 60 / 1e9;
+    size = QString("~%1 GB por minuto em %2").arg(gb, 0, 'f', 1).arg(where);
+  } else {
+    // Sem o daemon (used = "auto"), conta como H.264: a estimativa maior.
+    const uint64_t cap = video_max_bitrate(used.startsWith("av1"), quality.toStdString(), px.width(), px.height(), fps);
+    size = QString("Até ~%1 MB por minuto em %2 (teto de %3 Mbit/s)")
+               .arg(qRound(double(cap) / 8 * 60 / 1e6))
+               .arg(where)
+               .arg(qRound(double(cap) / 1e6));
+  }
+  video_size_hint_->setText(size);
 }
 
 // ---------------------------------------------------------------------------
