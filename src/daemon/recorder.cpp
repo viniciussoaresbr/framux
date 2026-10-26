@@ -17,6 +17,7 @@ extern "C" {
 #include <atomic>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -24,6 +25,7 @@ extern "C" {
 #include <variant>
 
 #include "common/log.h"
+#include "common/video_rate.h"
 #include "core/naming.h"
 #include "framux_build_config.h"
 
@@ -39,12 +41,14 @@ struct EncDef {
   Kind kind;
 };
 
-// Ordem = preferência do modo automático. AV1 primeiro, por hardware ou CPU:
-// o Fedora sem RPM Fusion decodifica AV1 rápido (dav1d), mas H.264 só pelo
-// openh264, lento demais para 1440p60, e HEVC nem isso. HEVC ficou de fora.
+// Ordem = preferência do modo automático: codificador da placa primeiro
+// (quase nenhuma CPU), AV1 antes de H.264; sem placa, CPU. HEVC ficou de
+// fora: o Fedora sem RPM Fusion não o decodifica. O teto de taxa
+// (video_rate.h) deixa o H.264 leve para o openh264 do Fedora tocar.
 constexpr EncDef kDefs[] = {
-    {"av1_hw", "av1_nvenc", Kind::Nvenc},   {"av1_hw", "av1_vaapi", Kind::Vaapi},   {"av1_sw", "libsvtav1", Kind::Svt},
-    {"h264_hw", "h264_nvenc", Kind::Nvenc}, {"h264_hw", "h264_vaapi", Kind::Vaapi}, {"x264", "libx264", Kind::X264},
+    {"av1_hw", "av1_nvenc", Kind::Nvenc},   {"av1_hw", "av1_vaapi", Kind::Vaapi},
+    {"h264_hw", "h264_nvenc", Kind::Nvenc}, {"h264_hw", "h264_vaapi", Kind::Vaapi},
+    {"av1_sw", "libsvtav1", Kind::Svt},     {"x264", "libx264", Kind::X264},
     {"utvideo", "utvideo", Kind::Utvideo},
 };
 
@@ -66,8 +70,9 @@ AVPixelFormat src_format(uint32_t vk) {
     case 57: return AV_PIX_FMT_RGB0;
     case 44:  // B8G8R8A8_UNORM
     case 50: return AV_PIX_FMT_BGR0;
-    case 58: return AV_PIX_FMT_X2RGB10LE;  // A2R10G10B10_UNORM_PACK32
-    case 64: return AV_PIX_FMT_X2BGR10LE;  // A2B10G10R10_UNORM_PACK32
+    case 58: return AV_PIX_FMT_X2RGB10LE;     // A2R10G10B10_UNORM_PACK32
+    case 64: return AV_PIX_FMT_X2BGR10LE;     // A2B10G10R10_UNORM_PACK32
+    case 1000156003: return AV_PIX_FMT_NV12;  // convertido na GPU pela camada
     default: return AV_PIX_FMT_NONE;
   }
 }
@@ -118,9 +123,10 @@ struct OpenEncoder {
 };
 
 // Configura e abre `def` em w×h. Devolve false (com o motivo) se o encoder
-// não existir ou o hardware recusar.
+// não existir ou o hardware recusar. `capped`: qualidade constante com teto
+// de taxa; o VA-API sem modo VBR no driver tenta de novo sem teto (CQP).
 bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &quality, bool global_header,
-                  OpenEncoder &out, std::string *why) {
+                  OpenEncoder &out, std::string *why, bool capped = true) {
   out.reset();
   const AVCodec *codec = avcodec_find_encoder_by_name(def.ffname);
   if (!codec) {
@@ -139,7 +145,12 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
   c->colorspace = AVCOL_SPC_BT709;
   c->color_primaries = AVCOL_PRI_BT709;
   c->color_trc = AVCOL_TRC_BT709;
-  const bool av1 = std::strncmp(def.ffname, "av1", 3) == 0;
+  const bool av1 = std::strncmp(def.ffname, "av1", 3) == 0 || def.kind == Kind::Svt;
+  const int64_t cap = capped ? int64_t(video_max_bitrate(av1, quality, w, h, fps)) : 0;
+  auto set_cap = [&] {
+    c->rc_max_rate = cap;
+    c->rc_buffer_size = int(std::min<int64_t>(cap * 2, INT32_MAX));  // ~2 s de folga para cenas pesadas
+  };
   out.sw_format = sw_format_for(def, codec);
   int r = 0;
   switch (def.kind) {
@@ -151,6 +162,7 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
       av_opt_set_int(c->priv_data, "cq", av1 ? quality_value(quality, 26, 32, 38) : quality_value(quality, 21, 26, 31),
                      0);
       c->bit_rate = 0;
+      set_cap();
       break;
     case Kind::Vaapi: {
       r = av_hwdevice_ctx_create(&out.hw_device, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
@@ -174,24 +186,31 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
       }
       c->pix_fmt = AV_PIX_FMT_VAAPI;
       c->hw_frames_ctx = av_buffer_ref(out.hw_frames);
-      av_opt_set(c->priv_data, "rc_mode", "CQP", 0);
-      // AV1 no VA-API usa o índice de quantização 0–255.
-      c->global_quality = av1 ? quality_value(quality, 90, 130, 170) : quality_value(quality, 21, 26, 31);
+      if (cap) {
+        av_opt_set(c->priv_data, "rc_mode", "VBR", 0);
+        c->bit_rate = cap * 3 / 4;
+        set_cap();
+      } else {
+        av_opt_set(c->priv_data, "rc_mode", "CQP", 0);
+        // AV1 no VA-API usa o índice de quantização 0–255.
+        c->global_quality = av1 ? quality_value(quality, 90, 130, 170) : quality_value(quality, 21, 26, 31);
+      }
       break;
     }
     case Kind::Svt:
       c->pix_fmt = out.sw_format;
       av_opt_set(c->priv_data, "preset", "10", 0);  // tempo real em CPU de jogo
       av_opt_set_int(c->priv_data, "crf", quality_value(quality, 30, 36, 42), 0);
+      set_cap();  // CRF com teto
       break;
     case Kind::X264:
       c->pix_fmt = out.sw_format;
       av_opt_set(c->priv_data, "preset", "veryfast", 0);
       av_opt_set_int(c->priv_data, "crf", quality_value(quality, 18, 23, 28), 0);
+      set_cap();  // VBV
       break;
     case Kind::Utvideo:
-      // Sem perda em RGB, como o "Force lossless RGB capture" do FRAPS:
-      // compressão leve (~230 fps em 2560×1080 num i5 de 6 núcleos; o FFV1
+      // Sem perda em RGB, para edição: compressão leve (~230 fps em 2560×1080 num i5 de 6 núcleos; o FFV1
       // não passava de 37) e arquivos grandes.
       c->pix_fmt = out.sw_format;
       c->colorspace = AVCOL_SPC_RGB;
@@ -211,6 +230,7 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
     *why = std::string(def.ffname) + ": " + av_err(r);
     avcodec_free_context(&c);
     out.reset();
+    if (def.kind == Kind::Vaapi && cap) return open_encoder(def, w, h, fps, quality, global_header, out, why, false);
     return false;
   }
   out.ctx = c;
@@ -346,7 +366,7 @@ struct Recorder::Impl {
   struct VideoItem {
     const uint8_t *data;
     uint32_t width, height, stride, vk_format;
-    bool flip_y;
+    bool flip_y, halved;
     uint64_t present_ns;
     std::function<void()> release;
   };
@@ -384,6 +404,7 @@ struct Recorder::Impl {
   AVPixelFormat planned = AV_PIX_FMT_NONE;
   int out_w = 0, out_h = 0;
   bool conv_started = false;
+  bool gpu_yuv = false;  // a camada mandou NV12 (lido pelo encoder depois do 1º quadro)
   uint64_t conv_start_ns = 0;
   int64_t conv_last_index = -1;
 
@@ -454,7 +475,7 @@ struct Recorder::Impl {
     }
     if (!conv_started) {
       int w = int(v.width), h = int(v.height);
-      if (opt.half) {
+      if (opt.half && !v.halved) {
         w /= 2;
         h /= 2;
       }
@@ -467,6 +488,7 @@ struct Recorder::Impl {
       }
       out_w = w;
       out_h = h;
+      gpu_yuv = sf == AV_PIX_FMT_NV12;
       conv_start_ns = v.present_ns;
       conv_started = true;
       // RGB→YUV de 2560×1080 leva ~7 ms num núcleo; em fatias, ~2 ms.
@@ -498,9 +520,15 @@ struct Recorder::Impl {
     src->format = sf;
     src->width = int(v.width);
     src->height = int(v.height);
-    set_color(src, true);
+    set_color(src, sf != AV_PIX_FMT_NV12);
     src->data[0] = const_cast<uint8_t *>(v.data);
     src->linesize[0] = int(v.stride);
+    src->data[1] = nullptr;
+    src->linesize[1] = 0;
+    if (sf == AV_PIX_FMT_NV12) {  // plano UV logo depois do Y
+      src->data[1] = src->data[0] + size_t(v.stride) * v.height;
+      src->linesize[1] = int(v.stride);
+    }
     if (v.flip_y) {  // glReadPixels: de baixo para cima
       src->data[0] += size_t(v.height - 1) * v.stride;
       src->linesize[0] = -int(v.stride);
@@ -650,8 +678,11 @@ struct Recorder::Impl {
     pkt = av_packet_alloc();
     start_ns = f.present_ns;
     started = true;
-    FRAMUX_LOG("gravando %s: %dx%d a %d fps com %s%s", opt.path.c_str(), w, h, opt.fps, venc.def->ffname,
-               aenc ? " + Opus" : "");
+    char cap[48] = "";
+    if (venc.ctx->rc_max_rate)
+      std::snprintf(cap, sizeof cap, ", teto de %.1f Mbit/s", double(venc.ctx->rc_max_rate) / 1e6);
+    FRAMUX_LOG("gravando %s: %dx%d a %d fps com %s%s, cor convertida %s%s", opt.path.c_str(), w, h, opt.fps,
+               venc.def->ffname, cap, gpu_yuv ? "na GPU" : "no daemon", aenc ? " + Opus" : "");
     while (!early_audio.empty()) {
       process_audio(early_audio.front());
       early_audio.pop_front();
@@ -843,14 +874,14 @@ Recorder::~Recorder() {
 }
 
 void Recorder::push_video(const uint8_t *data, uint32_t width, uint32_t height, uint32_t stride, uint32_t vk_format,
-                          bool flip_y, uint64_t present_ns, std::function<void()> release) {
+                          bool flip_y, bool halved, uint64_t present_ns, std::function<void()> release) {
   std::lock_guard lk(impl_->mu);
   if (impl_->stopping) {
     release();
     return;
   }
   impl_->input.push_back(
-      Impl::VideoItem{data, width, height, stride, vk_format, flip_y, present_ns, std::move(release)});
+      Impl::VideoItem{data, width, height, stride, vk_format, flip_y, halved, present_ns, std::move(release)});
   impl_->conv_cv.notify_one();
 }
 

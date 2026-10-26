@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <ctime>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -21,6 +22,7 @@
 #include "common/video_ring.h"
 #include "core/arbiter.h"
 #include "core/bench_files.h"
+#include "core/bench_stats.h"
 #include "daemon/dbus_service.h"
 #include "daemon/game_audio.h"
 #include "daemon/recorder.h"
@@ -83,6 +85,13 @@ struct Session {
   std::unique_ptr<GameAudio> audio;
   std::shared_ptr<VideoMap> video_map;
   uint64_t rec_start_ns = 0;
+  // Medição: presents do swapchain principal (últimos 10 s; durante a
+  // gravação, desde o início dela), FPS de antes, CPU do daemon e o custo
+  // informado pela camada (VideoCost).
+  std::deque<uint64_t> presents;
+  BenchStats fps_before;
+  uint64_t rec_cpu_start_ns = 0;
+  ipc::VideoCost video_cost{};
 
   uint32_t primary_swapchain() const;
   const SwapStat *primary() const;
@@ -132,6 +141,7 @@ class Daemon {
   ActionResult video_start(Session &s);
   // Para a gravação; a finalização (flush, trailer, MP4) vai para o worker.
   void video_stop(Session &s, bool tell_layer);
+  std::string recording_cost(Session &s);
   void start_encoder_probe();
   void send_indicators(Session &s, uint32_t event_flags, float bench_result = 0);
   void send_overlay(Session &s);

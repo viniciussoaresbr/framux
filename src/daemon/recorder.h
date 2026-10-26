@@ -56,9 +56,11 @@ class Recorder {
   Recorder &operator=(const Recorder &) = delete;
 
   // Quadro do jogo. `data` fica válido até `release()` ser chamado (na thread
-  // do Recorder, logo depois da conversão). Formatos: VkFormat de 32 bits.
+  // do Recorder, logo depois da conversão). Formatos: VkFormat RGB de 32 bits
+  // ou NV12 (ipc::kVkFormatNv12, BT.709 limitado). `halved`: a camada já
+  // reduziu à metade (não reduzir de novo).
   void push_video(const uint8_t *data, uint32_t width, uint32_t height, uint32_t stride, uint32_t vk_format,
-                  bool flip_y, uint64_t present_ns, std::function<void()> release);
+                  bool flip_y, bool halved, uint64_t present_ns, std::function<void()> release);
 
   // Amostras float intercaladas, 2 canais, 48 kHz; `time_ns` é o
   // CLOCK_MONOTONIC da primeira amostra. Pode ser chamado de qualquer thread.

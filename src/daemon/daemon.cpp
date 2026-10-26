@@ -6,6 +6,7 @@
 #include <sys/epoll.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -78,6 +79,14 @@ std::string cstr(const char *p, size_t n) { return std::string(p, strnlen(p, n))
 
 ActionResult no_session() {
   return {false, "io.github.framux.Error.NoSession", "nenhuma sessão de jogo ativa (rode o jogo com `framux run`)"};
+}
+
+// CPU (usuário + sistema) de todas as threads do daemon, em ns.
+uint64_t process_cpu_ns() {
+  rusage ru{};
+  getrusage(RUSAGE_SELF, &ru);
+  auto ns = [](const timeval &t) { return uint64_t(t.tv_sec) * 1'000'000'000ull + uint64_t(t.tv_usec) * 1000ull; };
+  return ns(ru.ru_utime) + ns(ru.ru_stime);
 }
 
 }  // namespace
@@ -507,6 +516,13 @@ void Daemon::handle_message(Session &s, ipc::Message &m) {
     case ipc::MsgType::FrameImage: handle_frame_image(s, m); break;
     case ipc::MsgType::VideoBuffer: handle_video_buffer(s, m); break;
     case ipc::MsgType::VideoFrame: handle_video_frame(s, m); break;
+    case ipc::MsgType::VideoCost:
+      if (const auto *c = m.as<ipc::VideoCost>(); c && s.rec) {
+        s.video_cost.cpu_ns += c->cpu_ns;
+        s.video_cost.max_ns = std::max(s.video_cost.max_ns, c->max_ns);
+        s.video_cost.frames += c->frames;
+      }
+      break;
     case ipc::MsgType::Error:
       if (const auto *e = m.as<ipc::ErrorMsg>()) {
         const std::string msg = cstr(e->message, sizeof e->message);
@@ -631,9 +647,11 @@ void Daemon::handle_video_frame(Session &s, const ipc::Message &m) {
   std::shared_ptr<VideoMap> vm = s.video_map;
   if (!vf || !vm || vf->generation != vm->generation || vf->slot >= kVideoSlots) return;
   auto release = [vm, slot = vf->slot] { vm->ring->state[slot].store(kSlotFree, std::memory_order_release); };
-  const uint64_t need = uint64_t(vf->stride) * vf->height;
+  const bool nv12 = vf->vk_format == ipc::kVkFormatNv12;
+  const uint64_t need = uint64_t(vf->stride) * vf->height * (nv12 ? 3 : 2) / 2;
   if (vf->width == 0 || vf->height == 0 || vf->width > 16384 || vf->height > 16384 ||
-      vf->stride < uint64_t(vf->width) * 4 || need > vm->ring->slot_bytes || vk_format_bpp(vf->vk_format) != 4) {
+      vf->stride < uint64_t(vf->width) * (nv12 ? 1 : 4) || (nv12 && (vf->width | vf->height) & 1) ||
+      need > vm->ring->slot_bytes || (!nv12 && vk_format_bpp(vf->vk_format) != 4)) {
     FRAMUX_LOG_ONCE("%s: quadro de vídeo inválido descartado", s.game.c_str());
     release();
     return;
@@ -644,7 +662,7 @@ void Daemon::handle_video_frame(Session &s, const ipc::Message &m) {
   }
   if (vf->dropped) s.rec->add_layer_drops(vf->dropped);
   s.rec->push_video(video_slot(vm->ring, vf->slot), vf->width, vf->height, vf->stride, vf->vk_format,
-                    vf->flags & ipc::kImgFlipY, vf->present_ns, std::move(release));
+                    vf->flags & ipc::kImgFlipY, vf->flags & ipc::kImgHalved, vf->present_ns, std::move(release));
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +670,7 @@ void Daemon::handle_video_frame(Session &s, const ipc::Message &m) {
 
 void Daemon::drain(Session &s) {
   if (!s.ring) return;
+  uint32_t primary = s.primary_swapchain();  // 0 antes do primeiro quadro
   ring_drain(
       s.ring,
       [&](const FrameRec &r) {
@@ -665,6 +684,12 @@ void Daemon::drain(Session &s) {
         sw.height = r.height;
         ++s.total_frames;
         if (r.present_ns > s.last_present_ns) s.last_present_ns = r.present_ns;
+        if (!primary) primary = r.swapchain_id;
+        if (r.swapchain_id == primary) {
+          s.presents.push_back(r.present_ns);
+          if (!s.rec)
+            while (s.presents.front() + 10'000'000'000ull < r.present_ns) s.presents.pop_front();
+        }
         if (s.bench && r.present_ns >= s.bench->start_ns) {
           Benchmark &b = *s.bench;
           if (!b.swapchain) b.swapchain = r.swapchain_id;
@@ -993,6 +1018,11 @@ ActionResult Daemon::video_start(Session &s) {
   opt.available = encoders_.available;
   s.rec = std::make_shared<Recorder>(std::move(opt));
   s.rec_start_ns = now_ns();
+  drain(s);
+  s.fps_before = compute_stats({s.presents.begin(), s.presents.end()});
+  s.presents.clear();
+  s.rec_cpu_start_ns = process_cpu_ns();
+  s.video_cost = {};
   if (s.cfg.audio.game) {
     std::weak_ptr<Recorder> weak = s.rec;
     s.audio = GameAudio::start(
@@ -1003,7 +1033,11 @@ ActionResult Daemon::video_start(Session &s) {
         &err);
     if (!s.audio) FRAMUX_LOG("gravação sem áudio: %s", err.c_str());
   }
-  ipc::VideoStart vs{s.rec_start_ns, uint32_t(v.fps), 0};
+  // A camada converte para NV12 (e reduz) na GPU, a não ser no sem perda,
+  // que precisa do RGB. Camadas antigas ignoram e mandam RGB inteiro.
+  const bool rgb = v.quality == "lossless" || v.encoder == "utvideo";
+  const uint32_t mode = rgb ? 0 : ipc::kVideoYuv | (v.scale == "half" ? ipc::kVideoHalf : 0);
+  ipc::VideoStart vs{s.rec_start_ns, uint32_t(v.fps), mode};
   ipc::send_struct(s.fd, ipc::MsgType::VideoStart, vs, MSG_DONTWAIT);
   send_indicators(s, 0);
   update_active();
@@ -1011,17 +1045,48 @@ ActionResult Daemon::video_start(Session &s) {
   return {true, {}, path};
 }
 
+// Uma linha para o log ao parar: FPS do jogo antes × durante, o que a cópia
+// custou na thread do jogo e quanto de CPU o daemon (conversão + encoder)
+// usou. É o que diz se a gravação está pesando no jogo.
+std::string Daemon::recording_cost(Session &s) {
+  const uint64_t wall = now_ns() - s.rec_start_ns;
+  const double cores = wall ? double(process_cpu_ns() - s.rec_cpu_start_ns) / double(wall) : 0;
+  const long ncpu = std::max(1L, sysconf(_SC_NPROCESSORS_ONLN));
+  const BenchStats during = compute_stats({s.presents.begin(), s.presents.end()});
+  auto fps = [](const BenchStats &b, char *out, size_t n) {
+    if (b.frames < 2)
+      std::snprintf(out, n, "?");
+    else
+      std::snprintf(out, n, "%.0f fps (1%% low %.0f)", b.avg_fps, b.low_1pct_fps);
+  };
+  char before[48], now[48], copy[96], out[384];
+  fps(s.fps_before, before, sizeof before);
+  fps(during, now, sizeof now);
+  const ipc::VideoCost &c = s.video_cost;
+  if (c.frames)
+    std::snprintf(copy, sizeof copy, "%.2f ms por quadro gravado (pior %.1f ms)",
+                  double(c.cpu_ns) / double(c.frames) / 1e6, double(c.max_ns) / 1e6);
+  else
+    std::snprintf(copy, sizeof copy, "sem dados (camada anterior à 0.4.2)");
+  std::snprintf(out, sizeof out,
+                "jogo %s antes, %s gravando; cópia na thread do jogo %s; framuxd %.2f núcleos (%.0f%% da CPU)", before,
+                now, copy, cores, 100.0 * cores / double(ncpu));
+  return out;
+}
+
 void Daemon::video_stop(Session &s, bool tell_layer) {
   if (!s.rec) return;
   if (tell_layer) ipc::send_msg(s.fd, ipc::MsgType::VideoStop, nullptr, 0, nullptr, 0, nullptr, 0, MSG_DONTWAIT);
   s.audio.reset();  // para de alimentar o Recorder antes de finalizar
+  drain(s);
+  const std::string cost = recording_cost(s);
   std::shared_ptr<Recorder> rec = std::move(s.rec);
   if (tell_layer) send_indicators(s, 0);
   const std::string game = s.game;
   FRAMUX_LOG("%s: gravação encerrada; finalizando o arquivo", game.c_str());
-  worker_.post([this, rec, game] {
+  worker_.post([this, rec, game, cost] {
     const RecorderResult r = rec->finish();
-    main_queue_.post([this, r, game] {
+    main_queue_.post([this, r, game, cost] {
       if (!r.ok) {
         FRAMUX_LOG("gravação de %s falhou: %s", game.c_str(), r.error.c_str());
         notify("Gravação falhou", r.error, "dialog-error");
@@ -1033,6 +1098,7 @@ void Daemon::video_stop(Session &s, bool tell_layer) {
                     double(r.bytes) / 1e6);
       FRAMUX_LOG("gravação salva: %s (%.1f s, %" PRIu64 " quadros, %" PRIu64 " repetidos, %" PRIu64 " descartados, %s)",
                  r.path.c_str(), r.seconds, r.frames, r.duplicated, r.dropped, r.encoder.c_str());
+      FRAMUX_LOG("medição da gravação: %s", cost.c_str());
       if (dbus_) dbus_->emit_file_saved(0, "video", r.path);
       if (r.error.empty())
         notify("Gravação salva", body, "video-x-generic");
