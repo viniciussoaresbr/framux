@@ -45,8 +45,8 @@ bool forward_to_running(const QString &name) {
 int snapshot(MainWindow &w, const QString &dir) {
   QDir().mkpath(dir);
   w.show();
-  const char *names[] = {"general", "fps", "screenshots"};
-  for (int i = 0; i < 3; ++i) {
+  const char *names[] = {"general", "fps", "recordings", "screenshots"};
+  for (int i = 0; i < 4; ++i) {
     w.select_tab(i);
     QApplication::processEvents();
     if (!w.grab().save(QString("%1/%2.png").arg(dir, names[i]))) return 1;

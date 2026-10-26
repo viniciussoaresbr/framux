@@ -86,12 +86,12 @@ QIcon app_icon(int state) {
   QIcon icon;
   for (int size : {16, 24, 32, 48, 64, 128, 256, 512}) {
     QPixmap pm(QString(":/framux/framux-%1.png").arg(size));
-    if (state == 1) {
+    if (state == 1 || state == 2) {
       QPainter p(&pm);
       p.setRenderHint(QPainter::Antialiasing);
       const qreal d = size * 0.36, m = size * 0.02;
       p.setPen(QPen(QColor(0x16, 0x19, 0x1e), qMax(1.0, size / 32.0)));
-      p.setBrush(QColor(0x30, 0xFF, 0x60));
+      p.setBrush(state == 2 ? QColor(0xFF, 0x30, 0x30) : QColor(0x30, 0xFF, 0x60));
       p.drawEllipse(QRectF(size - d - m, size - d - m, d, d));
     }
     icon.addPixmap(pm);

@@ -1,4 +1,4 @@
-// Janela principal (§C.8): abas Geral, FPS e Capturas no topo, linha
+// Janela principal (§C.8): abas Geral, FPS, Gravações e Capturas no topo, linha
 // de status do jogo ativo e ícone na bandeja.
 #pragma once
 
@@ -12,6 +12,7 @@
 #include "gui/widgets.h"
 
 class QButtonGroup;
+class QComboBox;
 class QFormLayout;
 class QRadioButton;
 class QSlider;
@@ -27,7 +28,7 @@ class MainWindow : public QMainWindow {
   // Mostra a janela (ou só a bandeja, se `minimized` e houver bandeja).
   void present(bool minimized);
   bool tray_active() const { return tray_ && tray_->isVisible(); }
-  // Abre a aba pelo índice (0 Geral, 1 FPS, 2 Capturas).
+  // Abre a aba pelo índice (0 Geral, 1 FPS, 2 Gravações, 3 Capturas).
   void select_tab(int index);
 
  protected:
@@ -36,6 +37,7 @@ class MainWindow : public QMainWindow {
  private:
   QWidget *build_general();
   QWidget *build_fps();
+  QWidget *build_recordings();
   QWidget *build_screenshots();
   void build_tray();
   void update_tray();
@@ -49,6 +51,8 @@ class MainWindow : public QMainWindow {
   void apply_status(const QByteArray &json);
   void set_status(const QString &dot_color, const QString &text);
   void update_environment();
+  // Encoder escolhido × encoders que o daemon encontrou nesta máquina.
+  void update_encoder_hint();
   // Opção de inicialização para jogos OpenGL (a do Flatpak, se integrado).
   QString launch_command() const;
 
@@ -97,6 +101,22 @@ class MainWindow : public QMainWindow {
   QCheckBox *log_fps_ = nullptr;
   QCheckBox *log_summary_ = nullptr;
   FolderRow *bench_folder_ = nullptr;
+
+  // Gravações
+  HotkeyButton *video_key_ = nullptr;
+  QButtonGroup *video_fps_ = nullptr;  // 30, 60 ou 0 (outro)
+  QSpinBox *video_fps_custom_ = nullptr;
+  QRadioButton *video_full_ = nullptr;
+  QRadioButton *video_half_ = nullptr;
+  QComboBox *video_encoder_ = nullptr;
+  QLabel *video_encoder_hint_ = nullptr;
+  QComboBox *video_quality_ = nullptr;
+  QCheckBox *video_mp4_ = nullptr;
+  FolderRow *video_folder_ = nullptr;
+  QCheckBox *audio_game_ = nullptr;
+  RecentVideos *recent_videos_ = nullptr;
+  QStringList encoders_;      // do StatusJson; vazio = daemon parado/desconhecido
+  QString encoders_missing_;  // explicação do que falta (ex.: RPM Fusion)
 
   // Screenshots
   HotkeyButton *shot_key_ = nullptr;

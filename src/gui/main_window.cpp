@@ -4,6 +4,7 @@
 #include <QButtonGroup>
 #include <QClipboard>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
@@ -26,6 +27,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -118,6 +120,7 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store) {
   tabs_ = new NavBar(central);
   tabs_->add("Geral", NavBar::Icon::General);
   tabs_->add("FPS", NavBar::Icon::Fps);
+  tabs_->add("Gravações", NavBar::Icon::Recordings);
   tabs_->add("Capturas", NavBar::Icon::Screenshots);
   // Nome à esquerda e abas centralizadas na janela: as duas colunas laterais
   // têm a mesma largura.
@@ -142,7 +145,8 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store) {
   v->addWidget(status);
 
   pages_ = new QStackedWidget(central);
-  for (QWidget *page : {build_general(), build_fps(), build_screenshots()}) pages_->addWidget(scrollable(page));
+  for (QWidget *page : {build_general(), build_fps(), build_recordings(), build_screenshots()})
+    pages_->addWidget(scrollable(page));
   v->addWidget(pages_, 1);
   tabs_->on_change = [this](int i) { pages_->setCurrentIndex(i); };
 
@@ -428,6 +432,211 @@ QWidget *MainWindow::build_fps() {
 }
 
 // ---------------------------------------------------------------------------
+// Gravações (aba Movies do FRAPS): vídeo, áudio e recentes.
+
+namespace {
+
+// Valores de [video] encoder, na ordem do combo, e o nome do daemon para
+// cada um (StatusJson "encoders").
+struct EncoderChoice {
+  const char *value;
+  const char *label;
+};
+constexpr EncoderChoice kEncoders[] = {
+    {"auto", "Automático"},
+    {"av1_hw", "AV1 (placa de vídeo)"},
+    {"av1_sw", "AV1 (processador, SVT-AV1)"},
+    {"h264_hw", "H.264 (placa de vídeo)"},
+    {"x264", "H.264 (processador, x264)"},
+    {"utvideo", "Ut Video sem perda (processador)"},
+};
+constexpr const char *kQualities[][2] = {
+    {"low", "Baixa (arquivos menores)"}, {"medium", "Média"}, {"high", "Alta"}, {"lossless", "Sem perda (Ut Video)"}};
+
+}  // namespace
+
+QWidget *MainWindow::build_recordings() {
+  auto *page = new QWidget;
+  auto *v = new QVBoxLayout(page);
+  v->setContentsMargins(0, 0, 0, 0);
+  v->setSpacing(12);
+
+  QVBoxLayout *b;
+  QFrame *opts = card("Gravação", page, &b);
+  auto *f = form();
+  video_key_ = new HotkeyButton(opts);
+  video_key_->setObjectName("videoKey");
+  video_key_->setToolTip("Pressione dentro do jogo para começar a gravar; pressione de novo para parar");
+  f->addRow("Iniciar/parar", hotkey_row(video_key_, opts));
+
+  auto *fps = new QWidget(opts);
+  auto *fl = new QHBoxLayout(fps);
+  fl->setContentsMargins(0, 0, 0, 0);
+  fl->setSpacing(14);
+  video_fps_ = new QButtonGroup(this);
+  for (int n : {30, 60}) {
+    auto *rb = new QRadioButton(QString::number(n), fps);
+    rb->setObjectName(QString("videoFps%1").arg(n));
+    video_fps_->addButton(rb, n);
+    fl->addWidget(rb);
+  }
+  auto *custom = new QRadioButton("Outro", fps);
+  custom->setObjectName("videoFpsCustom");
+  video_fps_->addButton(custom, 0);
+  fl->addWidget(custom);
+  video_fps_custom_ = new QSpinBox(fps);
+  video_fps_custom_->setObjectName("videoFpsValue");
+  video_fps_custom_->setRange(1, 240);
+  video_fps_custom_->setSuffix(" fps");
+  fl->addWidget(video_fps_custom_);
+  fl->addStretch();
+  f->addRow("FPS do vídeo", fps);
+
+  auto *size = new QWidget(opts);
+  auto *zl = new QHBoxLayout(size);
+  zl->setContentsMargins(0, 0, 0, 0);
+  zl->setSpacing(14);
+  video_full_ = new QRadioButton("Tamanho cheio", size);
+  video_half_ = new QRadioButton("Metade", size);
+  video_half_->setToolTip("Metade da largura e da altura: arquivos ~4× menores e menos carga na gravação");
+  auto *size_group = new QButtonGroup(this);
+  size_group->addButton(video_full_);
+  size_group->addButton(video_half_);
+  zl->addWidget(video_full_);
+  zl->addWidget(video_half_);
+  zl->addStretch();
+  f->addRow("Resolução", size);
+
+  auto *enc = new QWidget(opts);
+  auto *el = new QVBoxLayout(enc);
+  el->setContentsMargins(0, 0, 0, 0);
+  el->setSpacing(4);
+  video_encoder_ = new QComboBox(enc);
+  video_encoder_->setObjectName("videoEncoder");
+  for (const auto &e : kEncoders) video_encoder_->addItem(e.label, QString(e.value));
+  video_encoder_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  video_encoder_hint_ = hint("", enc);
+  video_encoder_hint_->hide();
+  el->addWidget(video_encoder_, 0, Qt::AlignLeft);
+  el->addWidget(video_encoder_hint_);
+  f->addRow("Codificador", enc);
+
+  video_quality_ = new QComboBox(opts);
+  video_quality_->setObjectName("videoQuality");
+  for (const auto &q : kQualities) video_quality_->addItem(q[1], QString(q[0]));
+  video_quality_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  f->addRow("Qualidade", video_quality_);
+  // QFormLayout estica o combo; o alinhamento à esquerda fica no rótulo.
+  f->setAlignment(video_quality_, Qt::AlignLeft);
+
+  video_mp4_ = new QCheckBox("Converter para MP4 ao terminar", opts);
+  video_mp4_->setObjectName("videoMp4");
+  video_mp4_->setToolTip(
+      "A gravação é sempre feita em MKV, que sobrevive se o jogo travar. Ao parar, o arquivo é "
+      "convertido para MP4 (sem recodificar), mais fácil de compartilhar e editar.");
+  f->addRow("Arquivo", video_mp4_);
+  video_folder_ = new FolderRow(opts);
+  f->addRow("Pasta", video_folder_);
+  b->addLayout(f);
+  v->addWidget(opts);
+
+  QFrame *audio = card("Áudio", page, &b);
+  audio_game_ = new QCheckBox("Gravar o som do jogo", audio);
+  audio_game_->setObjectName("audioGame");
+  b->addWidget(audio_game_);
+  b->addWidget(
+      hint("Só o áudio do processo do jogo, pelo PipeWire: músicas, chamadas e avisos de outros "
+           "programas ficam de fora.",
+           audio));
+  v->addWidget(audio);
+
+  QFrame *rec = card("Recentes", page, &b);
+  recent_videos_ = new RecentVideos(rec);
+  b->addWidget(recent_videos_);
+  v->addWidget(rec);
+  v->addStretch();
+
+  video_key_->on_change = [this](const std::string &h) {
+    const QString err = check_hotkey(h, &Config::Hotkeys::video);
+    if (err.isEmpty()) store_.edit([h](Config &c) { c.hotkeys.video = h; });
+    return err;
+  };
+  auto save_fps = [this] {
+    const int id = video_fps_->checkedId();
+    video_fps_custom_->setEnabled(id == 0);
+    if (loading_ || id < 0) return;
+    const int n = id == 0 ? video_fps_custom_->value() : id;
+    store_.edit([n](Config &c) { c.video.fps = n; });
+  };
+  connect(video_fps_, &QButtonGroup::idToggled, this, [save_fps](int, bool on) {
+    if (on) save_fps();
+  });
+  connect(video_fps_custom_, &QSpinBox::valueChanged, this, save_fps);
+  connect(video_half_, &QRadioButton::toggled, this, [this](bool on) {
+    if (!loading_) store_.edit([on](Config &c) { c.video.scale = on ? "half" : "full"; });
+  });
+  connect(video_encoder_, &QComboBox::currentIndexChanged, this, [this] {
+    update_encoder_hint();
+    if (loading_) return;
+    const std::string e = video_encoder_->currentData().toString().toStdString();
+    store_.edit([e](Config &c) { c.video.encoder = e; });
+  });
+  connect(video_quality_, &QComboBox::currentIndexChanged, this, [this] {
+    update_encoder_hint();
+    if (loading_) return;
+    const std::string q = video_quality_->currentData().toString().toStdString();
+    store_.edit([q](Config &c) { c.video.quality = q; });
+  });
+  connect(video_mp4_, &QCheckBox::toggled, this, [this](bool on) {
+    if (!loading_) store_.edit([on](Config &c) { c.video.container = on ? "mp4" : "mkv"; });
+  });
+  video_folder_->on_change = [this](const std::string &d) {
+    store_.edit([d](Config &c) { c.video.folder = d; });
+    recent_videos_->set_folder(expanded_folder(d));
+  };
+  connect(audio_game_, &QCheckBox::toggled, this, [this](bool on) {
+    if (!loading_) store_.edit([on](Config &c) { c.audio.game = on; });
+  });
+  return page;
+}
+
+void MainWindow::update_encoder_hint() {
+  const bool lossless = video_quality_->currentData().toString() == "lossless";
+  video_encoder_->setEnabled(!lossless);
+  QString text;
+  if (lossless) {
+    text = "Sem perda sempre usa Ut Video: arquivos enormes (5 GB ou mais por minuto em 1080p60) e sempre MKV.";
+  } else if (!encoders_.isEmpty()) {
+    // Itens que o daemon não encontrou ficam desabilitados com o motivo.
+    auto *model = qobject_cast<QStandardItemModel *>(video_encoder_->model());
+    for (int i = 0; i < video_encoder_->count(); ++i) {
+      const QString value = video_encoder_->itemData(i).toString();
+      const bool ok = value == "auto" || encoders_.contains(value);
+      if (model) model->item(i)->setEnabled(ok);
+    }
+    const QString cur = video_encoder_->currentData().toString();
+    QString used = cur;
+    if (cur == "auto") {
+      used = encoders_.first();
+      text = "Vai usar: " + video_encoder_->itemText(video_encoder_->findData(used)) + ".";
+    } else if (!encoders_.contains(cur)) {
+      used = encoders_.first();
+      text = "<span style='color:#e8912d'>Indisponível nesta máquina; a gravação usará o automático.</span>";
+    }
+    // ffmpeg-free só decodifica H.264 pelo openh264: 1440p60 em qualidade
+    // alta não chega a tempo real e o vídeo trava no player.
+    if (used == "h264_hw" || used == "x264")
+      text += (text.isEmpty() ? "" : " ") +
+              QString(
+                  "Sem o FFmpeg do RPM Fusion, players do Fedora decodificam H.264 devagar: em resolução alta "
+                  "o vídeo pode travar ao assistir. AV1 toca liso.");
+    if (!encoders_missing_.isEmpty()) text += (text.isEmpty() ? "" : " ") + encoders_missing_.toHtmlEscaped();
+  }
+  video_encoder_hint_->setText(text);
+  video_encoder_hint_->setVisible(!text.isEmpty());
+}
+
+// ---------------------------------------------------------------------------
 // Screenshots: formulário + recentes.
 
 QWidget *MainWindow::build_screenshots() {
@@ -557,6 +766,20 @@ void MainWindow::load_from_config() {
   log_summary_->setChecked(c.benchmark.log_summary);
   bench_folder_->set_folder(c.benchmark.folder);
 
+  video_key_->set_hotkey(c.hotkeys.video);
+  const int fps_id = c.video.fps == 30 || c.video.fps == 60 ? c.video.fps : 0;
+  video_fps_->button(fps_id)->setChecked(true);
+  video_fps_custom_->setValue(c.video.fps);
+  video_fps_custom_->setEnabled(fps_id == 0);
+  (c.video.scale == "half" ? video_half_ : video_full_)->setChecked(true);
+  video_encoder_->setCurrentIndex(std::max(0, video_encoder_->findData(QString::fromStdString(c.video.encoder))));
+  video_quality_->setCurrentIndex(std::max(0, video_quality_->findData(QString::fromStdString(c.video.quality))));
+  video_mp4_->setChecked(c.video.container == "mp4");
+  video_folder_->set_folder(c.video.folder);
+  recent_videos_->set_folder(expanded_folder(c.video.folder));
+  audio_game_->setChecked(c.audio.game);
+  update_encoder_hint();
+
   shot_key_->set_hotkey(c.hotkeys.screenshot);
   if (QAbstractButton *rb = format_->button(int(c.screenshot.format))) rb->setChecked(true);
   jpeg_quality_->setValue(c.screenshot.jpeg_quality);
@@ -582,7 +805,7 @@ QString MainWindow::check_hotkey(const std::string &h, const std::string Config:
       {&Config::Hotkeys::overlay, "overlay"},
       {&Config::Hotkeys::overlay_corner, "canto do overlay"},
       {&Config::Hotkeys::screenshot, "screenshot"},
-      {&Config::Hotkeys::video, "vídeo"},
+      {&Config::Hotkeys::video, "atalho de gravação"},
   };
   for (const auto &[field, name] : others)
     if (field != self && hk.*field == h) return QString("Já usado no %1").arg(name);
@@ -614,6 +837,14 @@ void MainWindow::poll_status() {
 
 void MainWindow::apply_status(const QByteArray &json) {
   const QJsonObject o = QJsonDocument::fromJson(json).object();
+  QStringList encoders;
+  for (const QJsonValue &e : o.value("encoders").toArray()) encoders << e.toString();
+  const QString missing = o.value("encoders_missing").toString();
+  if (encoders != encoders_ || missing != encoders_missing_) {
+    encoders_ = encoders;
+    encoders_missing_ = missing;
+    update_encoder_hint();
+  }
   const QString backend = o.value("hotkey_backend").toString();
   if (backend != hotkey_backend_) {
     hotkey_backend_ = backend;
@@ -627,7 +858,10 @@ void MainWindow::apply_status(const QByteArray &json) {
   }
   if (active.isEmpty()) {
     set_status("#8a8b91", "Nenhum jogo em execução");
-    if (tray_) tray_->setToolTip("Framux: nenhum jogo em execução");
+    if (tray_) {
+      tray_->setToolTip("Framux: nenhum jogo em execução");
+      tray_->setIcon(app_icon());
+    }
     return;
   }
   QString text = QString("<b>%1</b> — %2 fps · %3")
@@ -638,12 +872,21 @@ void MainWindow::apply_status(const QByteArray &json) {
   if (!gpu.isEmpty()) text += " · " + gpu.toHtmlEscaped();
   const bool bench = active.value("benchmark").toBool();
   if (bench) text += " · <span style='color:#30d060'>benchmark em andamento</span>";
+  const bool recording = active.value("recording").toBool();
+  if (recording) {
+    const int secs = active.value("recording_s").toInt();
+    text += QString(" · <span style='color:#ff5050'>● gravando %1:%2</span>")
+                .arg(secs / 60, 2, 10, QChar('0'))
+                .arg(secs % 60, 2, 10, QChar('0'));
+  }
   if (count > 1) text += QString(" · +%1").arg(count - 1);
   set_status("#3ec46d", text);
   if (tray_) {
-    tray_->setToolTip(
-        QString("Framux: %1 — %2 fps").arg(active.value("game").toString()).arg(active.value("fps").toInt()));
-    tray_->setIcon(app_icon(bench ? 1 : 0));
+    tray_->setToolTip(QString("Framux: %1 — %2 fps%3")
+                          .arg(active.value("game").toString())
+                          .arg(active.value("fps").toInt())
+                          .arg(recording ? " (gravando)" : ""));
+    tray_->setIcon(app_icon(recording ? 2 : bench ? 1 : 0));
   }
 }
 
@@ -721,6 +964,11 @@ void MainWindow::build_tray() {
   menu->addSeparator();
   menu->addAction("Abrir pasta de benchmarks", this, [this] {
     const QString d = expanded_folder(store_.get().benchmark.folder);
+    QDir().mkpath(d);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+  });
+  menu->addAction("Abrir pasta de vídeos", this, [this] {
+    const QString d = expanded_folder(store_.get().video.folder);
     QDir().mkpath(d);
     QDesktopServices::openUrl(QUrl::fromLocalFile(d));
   });

@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QKeyEvent>
+#include <QLocale>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -135,6 +136,14 @@ void draw_nav_icon(QPainter &p, NavBar::Icon icon, QPointF c, const QColor &colo
       p.drawLine(QPointF(10, 11.5), QPointF(14.5, 6));
       p.setBrush(color);
       p.drawEllipse(QPointF(10, 11.5), 1.8, 1.8);
+      break;
+    }
+    case NavBar::Icon::Recordings: {  // filmadora
+      p.drawRoundedRect(QRectF(1.5, 5, 12, 10), 2.5, 2.5);
+      const QPointF lens[] = {{13.5, 8.5}, {18.5, 5.5}, {18.5, 14.5}, {13.5, 11.5}};
+      p.drawPolygon(lens, 4);
+      p.setBrush(color);
+      p.drawEllipse(QPointF(5.5, 8.5), 1.4, 1.4);
       break;
     }
     case NavBar::Icon::Screenshots:  // câmera
@@ -716,6 +725,51 @@ void RecentShots::refresh() {
           Qt::QueuedConnection);
     }
   }).detach();
+}
+
+// ---------------------------------------------------------------------------
+// RecentVideos
+
+RecentVideos::RecentVideos(QWidget *parent) : QListWidget(parent) {
+  setSelectionMode(QAbstractItemView::NoSelection);
+  setCursor(Qt::PointingHandCursor);
+  setFixedHeight(5 * 26 + 8);
+  connect(this, &QListWidget::itemClicked, [](QListWidgetItem *it) {
+    const QString path = it->data(Qt::UserRole).toString();
+    if (!path.isEmpty()) QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+  });
+  // Durante a gravação o tamanho muda a cada escrita: atualiza com folga.
+  connect(&watcher_, &QFileSystemWatcher::directoryChanged, this,
+          [this] { QTimer::singleShot(400, this, [this] { refresh(); }); });
+}
+
+void RecentVideos::set_folder(const QString &abs) {
+  if (!watcher_.directories().isEmpty()) watcher_.removePaths(watcher_.directories());
+  folder_ = abs;
+  if (QDir(abs).exists()) watcher_.addPath(abs);
+  refresh();
+}
+
+void RecentVideos::refresh() {
+  clear();
+  QDir dir(folder_);
+  if (dir.exists() && !watcher_.directories().contains(folder_)) watcher_.addPath(folder_);
+  const QFileInfoList files = dir.entryInfoList({"*.mkv", "*.mp4"}, QDir::Files, QDir::Time);
+  if (files.isEmpty()) {
+    auto *it = new QListWidgetItem("Nenhuma gravação ainda — use o atalho dentro de um jogo", this);
+    it->setFlags(Qt::NoItemFlags);
+    return;
+  }
+  const QLocale locale;
+  for (int i = 0; i < files.size() && i < kRecentCount; ++i) {
+    const QFileInfo &fi = files[i];
+    auto *it = new QListWidgetItem(QString("%1   ·   %2   ·   %3")
+                                       .arg(fi.completeBaseName(), fi.lastModified().toString("dd/MM HH:mm"),
+                                            locale.formattedDataSize(fi.size(), 1, QLocale::DataSizeSIFormat)),
+                                   this);
+    it->setData(Qt::UserRole, fi.absoluteFilePath());
+    it->setToolTip(fi.absoluteFilePath());
+  }
 }
 
 }  // namespace framux::gui

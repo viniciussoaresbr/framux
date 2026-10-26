@@ -39,7 +39,7 @@ class Brand : public QWidget {
 // pílula verde-limão (cores da logo). Setas ←/→ trocam com o foco.
 class NavBar : public QWidget {
  public:
-  enum class Icon { General, Fps, Screenshots };
+  enum class Icon { General, Fps, Recordings, Screenshots };
 
   explicit NavBar(QWidget *parent);
   void add(const QString &text, Icon icon);
@@ -158,6 +158,18 @@ class FolderRow : public QWidget {
 class RecentShots : public QListWidget {
  public:
   explicit RecentShots(QWidget *parent = nullptr);
+  void set_folder(const QString &abs);
+  void refresh();
+
+ private:
+  QString folder_;
+  QFileSystemWatcher watcher_;
+};
+
+// Lista dos vídeos mais recentes (nome, data e tamanho); clique abre o vídeo.
+class RecentVideos : public QListWidget {
+ public:
+  explicit RecentVideos(QWidget *parent = nullptr);
   void set_folder(const QString &abs);
   void refresh();
 
