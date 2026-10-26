@@ -16,6 +16,7 @@ jobs:
             vulkan-headers vulkan-loader-devel vulkan-utility-libraries-devel vulkan-validation-layers \
             libX11-devel libxcb-devel libXtst-devel mesa-libGL-devel mesa-libEGL-devel \
             libpng-devel libjpeg-turbo-devel systemd-devel tomlplusplus-devel catch2-devel qt6-qtbase-devel libstdc++-static \
+            ffmpeg-free-devel pipewire-devel \
             xorg-x11-server-Xvfb dbus-daemon vulkan-tools glx-utils mesa-vulkan-drivers mesa-dri-drivers \
             glibc-devel.i686 libstdc++-devel.i686 libstdc++-static.i686 libatomic.i686 libX11-devel.i686 libxcb-devel.i686 \
             libXau-devel.i686 mesa-libGL-devel.i686 mesa-libEGL-devel.i686 vulkan-loader-devel.i686 \
