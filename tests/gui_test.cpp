@@ -4,10 +4,12 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
@@ -96,8 +98,23 @@ int main(int argc, char **argv) {
   QTest::mouseClick(bench, Qt::MiddleButton);
   CHECK(bench->hotkey() == "Mouse2");
 
-  // Atalho repetido é recusado.
+  // Gravações: F9 por padrão; FPS "Outro" com 45, metade, MP4 e sem áudio.
   w.select_tab(2);
+  auto *video = find<gui::HotkeyButton>(w, "videoKey");
+  if (!video) return 1;
+  CHECK(video->hotkey() == "F9");
+  QTest::mouseClick(video, Qt::LeftButton);
+  QTest::keyClick(video, Qt::Key_F10);  // já é do screenshot
+  CHECK(video->hotkey() == "F9");
+  CHECK(find<QRadioButton>(w, "videoFps60") && find<QRadioButton>(w, "videoFps60")->isChecked());
+  if (auto *custom = find<QRadioButton>(w, "videoFpsCustom")) custom->setChecked(true);
+  if (auto *spin = find<QSpinBox>(w, "videoFpsValue")) spin->setValue(45);
+  if (auto *mp4 = find<QCheckBox>(w, "videoMp4")) mp4->setChecked(true);
+  if (auto *audio = find<QCheckBox>(w, "audioGame")) audio->setChecked(false);
+  if (auto *quality = find<QComboBox>(w, "videoQuality")) quality->setCurrentIndex(quality->findData("medium"));
+
+  // Atalho repetido é recusado.
+  w.select_tab(3);
   auto *shot = find<gui::HotkeyButton>(w, "shotKey");
   if (!shot) return 1;
   QTest::mouseClick(shot, Qt::LeftButton);
@@ -119,6 +136,11 @@ int main(int argc, char **argv) {
   CHECK(c.hotkeys.benchmark == "Mouse2");
   CHECK(c.hotkeys.screenshot == "F10");
   CHECK(c.screenshot.format == ImageFormat::Jpeg);
+  CHECK(c.hotkeys.video == "F9");
+  CHECK(c.video.fps == 45);
+  CHECK(c.video.container == "mp4");
+  CHECK(c.video.quality == "medium");
+  CHECK(!c.audio.game);
 
   QFile env(tmp.path() + "/.config/environment.d/90-framux.conf");
   CHECK(env.open(QIODevice::ReadOnly) && env.readAll().contains("FRAMUX_AUTO=1"));

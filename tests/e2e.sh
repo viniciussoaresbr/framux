@@ -1,8 +1,8 @@
 #!/bin/bash
-# Testes ponta a ponta (§C.12 testes 1, 2, 5, 10) com daemon, camada/shim e
+# Testes ponta a ponta (§C.12 testes 1, 2, 5, 8, 10) com daemon, camada/shim e
 # CLI reais, num ambiente isolado (XDG_RUNTIME_DIR, config e D-Bus próprios).
 # Requer: Xvfb (via with_xvfb.sh), dbus-run-session, vkcube e glxgears.
-# uso: e2e.sh <builddir> <cenário: vulkan|gl|kill|reconnect|pause|hotkeys|auto|reload>
+# uso: e2e.sh <builddir> <cenário: vulkan|gl|kill|reconnect|pause|hotkeys|auto|reload|video|video-gl|video-kill>
 set -u
 B=$1
 SCENARIO=$2
@@ -15,7 +15,7 @@ if [ -z "${FRAMUX_E2E_INNER:-}" ]; then
 fi
 
 case $SCENARIO in
-  gl) APP=(glxgears) ;;
+  gl|video-gl) APP=(glxgears) ;;
   *) APP=(vkcube --wsi xcb --c 1000000) ;;
 esac
 command -v "${APP[0]}" >/dev/null || { echo "${APP[0]} ausente"; exit 77; }
@@ -41,6 +41,11 @@ folder = "$T/bench"
 fraps_compat = true # chave removida: deve ser aceita sem efeito
 [screenshot]
 folder = "$T/shots"
+[video]
+folder = "$T/videos"
+fps = 30
+[audio]
+game = false # sem PipeWire no ambiente de teste
 EOT
 export PATH=$B/src/cli:$B/src/daemon:$PATH FRAMUX_DAEMON=$B/src/daemon/framuxd
 export FRAMUX_GL_PRELOAD=$B/src/gl/libframux_gl.so VK_ADD_IMPLICIT_LAYER_PATH=$B/src/layer
@@ -51,6 +56,23 @@ start_app() { framux run "${APP[@]}" >/dev/null 2>"$T/app.log" & AP=$!; }
 wait_session() {
   for _ in $(seq 60); do framux status 2>/dev/null | grep -q "${APP[0]}" && return; sleep 0.1; done
   fail "sessão de ${APP[0]} não apareceu"
+}
+# Espera o arquivo final da gravação e confere a trilha de vídeo:
+# check_video <extensão> <codec esperado ou ""> <largura> <altura> <quadros mínimos>
+check_video() {
+  local file info
+  for _ in $(seq 100); do
+    file=$(ls "$T"/videos/*."$1" 2>/dev/null) && grep -q "gravação salva" "$T/daemon.log" && break
+    sleep 0.1
+  done
+  [ -n "$file" ] || fail "vídeo .$1 não foi gravado"
+  [ "$(ls "$T"/videos | wc -l)" -eq 1 ] || fail "sobrou outro arquivo na pasta: $(ls "$T"/videos)"
+  info=$("$B/tests/video_probe" "$file" | grep '^video') || fail "vídeo ilegível: $file"
+  echo "vídeo: $info"
+  read -r _ codec w h n _ <<<"$info"
+  [ -z "$2" ] || [ "$codec" = "$2" ] || fail "codec $codec, esperado $2"
+  [ "$w" -eq "$3" ] && [ "$h" -eq "$4" ] || fail "tamanho ${w}x$h, esperado $3x$4"
+  [ "$n" -ge "$5" ] || fail "só $n quadros"
 }
 check_bench() {
   local summary
@@ -141,6 +163,13 @@ case $SCENARIO in
     ls "$T"/shots/*.png >/dev/null 2>&1 || fail "F10 não gerou screenshot"
     "$B/tests/xkey" F11
     check_bench
+    # F9 inicia a gravação e, apertada de novo, para.
+    "$B/tests/xkey" F9
+    sleep 0.3
+    framux status | grep -q "gravando" || fail "F9 não iniciou a gravação"
+    sleep 1.5
+    "$B/tests/xkey" F9
+    check_video mkv "" 500 500 30
     echo "hotkeys ok"
     ;;
   reload)
@@ -186,6 +215,43 @@ case $SCENARIO in
     ls "$T"/shots/*.png >/dev/null 2>&1 && fail "screenshot atrasado foi gravado"
     framux shot >/dev/null || fail "screenshot depois da pausa"
     echo "pausa ok"
+    ;;
+  video)
+    # Teste 8 (reduzido): 2 s a 30 fps com o encoder automático, MP4 no fim.
+    sed -i 's/^\[video\]$/[video]\ncontainer = "mp4"/' "$XDG_CONFIG_HOME/framux/config.toml"
+    start_daemon
+    start_app
+    wait_session
+    framux rec start >/dev/null || fail "rec start"
+    framux status | grep -q "gravando" || fail "status não mostra a gravação"
+    framux rec start >/dev/null 2>&1 && fail "rec start repetido deveria falhar"
+    sleep 2
+    framux rec stop >/dev/null || fail "rec stop"
+    # vkcube usa a janela padrão de 500×500.
+    check_video mp4 "" 500 500 50
+    ;;
+  video-gl)
+    # OpenGL (PBO, linhas invertidas) em Ut Video sem perda e metade do tamanho.
+    sed -i 's/^\[video\]$/[video]\nquality = "lossless"\nscale = "half"/' "$XDG_CONFIG_HOME/framux/config.toml"
+    start_daemon
+    start_app
+    wait_session
+    framux rec toggle >/dev/null || fail "rec toggle (iniciar)"
+    sleep 2
+    framux rec toggle >/dev/null || fail "rec toggle (parar)"
+    # glxgears abre em 300×300.
+    check_video mkv utvideo 150 150 50
+    ;;
+  video-kill)
+    # Jogo morto no meio da gravação: o daemon fecha um arquivo válido.
+    start_daemon
+    start_app
+    wait_session
+    framux rec start >/dev/null || fail "rec start"
+    sleep 2
+    kill -9 $AP
+    wait $AP 2>/dev/null
+    check_video mkv "" 500 500 40
     ;;
   *) echo "cenário desconhecido: $SCENARIO"; exit 2 ;;
 esac

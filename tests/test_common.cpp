@@ -68,6 +68,21 @@ x = 1
   REQUIRE(w2.size() == 1);
 }
 
+TEST_CASE("config: encoders removidos (HEVC, FFV1) migram sem aviso", "[config]") {
+  Config c;
+  c.video.encoder = "av1_sw";
+  std::vector<std::string> w;
+  REQUIRE(apply_config_toml(c, "[video]\nencoder = \"hevc_hw\"\n", "t.toml", &w));
+  REQUIRE(c.video.encoder == "auto");
+  REQUIRE(w.empty());
+  REQUIRE(apply_config_toml(c, "[video]\nencoder = \"ffv1\"\n", "t.toml", &w));
+  REQUIRE(c.video.encoder == "utvideo");
+  REQUIRE(w.empty());
+  REQUIRE(apply_config_toml(c, "[video]\nencoder = \"h265\"\n", "t.toml", &w));
+  REQUIRE(c.video.encoder == "utvideo");  // inválido: mantém
+  REQUIRE(w.size() == 1);
+}
+
 TEST_CASE("config: ida e volta pelo TOML", "[config]") {
   Config c;
   c.overlay.corner = ipc::Corner::Hidden;

@@ -52,14 +52,23 @@ else
 endif
 
 png_probe = executable('png_probe', files('png_probe.cpp'), dependencies : png_dep)
-e2e_deps = [framux_gl, framux_vk, framuxd, framux_cli, png_probe]
+video_probe = executable('video_probe', files('video_probe.cpp'),
+  dependencies : [dependency('libavformat'), dependency('libavcodec'), dependency('libavutil')])
+e2e_deps = [framux_gl, framux_vk, framuxd, framux_cli, png_probe, video_probe]
 xtst_dep = dependency('xtst', required : false)
-e2e_scenarios = ['vulkan', 'gl', 'kill', 'reconnect', 'pause', 'auto', 'reload']
+e2e_scenarios = ['vulkan', 'gl', 'kill', 'reconnect', 'pause', 'auto', 'reload', 'video', 'video-gl', 'video-kill']
 if xtst_dep.found()
   e2e_deps += executable('xkey', files('xkey.cpp'), dependencies : [xtst_dep, x11_dep])
   e2e_scenarios += 'hotkeys'
 endif
 
+
+recorder_test = executable('recorder_test', files('recorder_test.cpp'),
+  include_directories : include_directories('../src'), dependencies : framux_video_dep)
+test('recorder', recorder_test, timeout : 120)
+audio_capture_test = executable('audio_capture_test', files('audio_capture_test.cpp'),
+  include_directories : include_directories('../src'), dependencies : framux_video_dep)
+test('audio-capture', find_program('audio_test.sh'), args : audio_capture_test, is_parallel : false, timeout : 60)
 
 e2e = find_program('e2e.sh')
 foreach scenario : e2e_scenarios
