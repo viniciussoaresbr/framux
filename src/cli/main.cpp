@@ -33,7 +33,7 @@ void usage(FILE *f) {
                "  bench start|stop|toggle [--duration S]\n"
                "  shot [--overlay]              screenshot do jogo ativo\n"
                "  overlay toggle|next|hide|show mostra/oculta (toggle) ou troca o canto (next)\n"
-               "  rec start|stop|toggle         (gravação de vídeo: ainda não disponível)\n"
+               "  rec start|stop|toggle         grava o jogo ativo (ou F9 no jogo)\n"
                "  loop on|off|save              (loop recording: ainda não disponível)\n"
                "  doctor                        diagnóstico do ambiente\n"
                "  flatpak status|enable|disable integração com o Steam Flatpak\n"
