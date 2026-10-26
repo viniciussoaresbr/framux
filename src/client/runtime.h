@@ -78,6 +78,10 @@ class Runtime {
   bool video_write(const void *src, uint32_t width, uint32_t height, uint32_t src_stride, uint32_t vk_format,
                    uint32_t flags, uint64_t present_ns);
   bool video_active() const { return video_fps_.load(std::memory_order_relaxed) != 0; }
+  uint32_t video_mode() const { return video_mode_.load(std::memory_order_relaxed); }  // ipc::VideoModeFlags
+  // Tempo que a camada/shim gastou para entregar um quadro ao video_write
+  // (mapear a cópia da GPU + copiar para o slot); vai ao daemon em lotes.
+  void add_video_cost(uint64_t ns);
 
   void shutdown();
 
@@ -140,6 +144,7 @@ class Runtime {
 
   // Gravação: ritmo (present_lock_) e buffer compartilhado (video_mu_).
   std::atomic<uint32_t> video_fps_{0};
+  std::atomic<uint32_t> video_mode_{0};
   uint64_t video_period_ns_ = 0;
   uint64_t video_due_ns_ = 0;
   std::mutex video_mu_;
@@ -147,6 +152,7 @@ class Runtime {
   size_t video_ring_size_ = 0;
   uint32_t video_generation_ = 0;
   uint32_t video_dropped_ = 0;
+  ipc::VideoCost video_cost_{};  // video_mu_
 
   // Comandos recebidos pela thread de IPC, consumidos no present.
   std::mutex pending_mu_;

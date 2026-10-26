@@ -354,9 +354,11 @@ void Runtime::release_video_ring() {
 bool Runtime::video_write(const void *src, uint32_t width, uint32_t height, uint32_t src_stride, uint32_t vk_format,
                           uint32_t flags, uint64_t present_ns) {
   if (!video_active()) return false;
-  const uint32_t bpp = 4;  // a camada só grava formatos de 32 bits por pixel
-  const uint32_t stride = width * bpp;
-  const uint64_t need = uint64_t(stride) * height;
+  // RGB de 32 bits por pixel ou NV12 (src_stride por linha de Y, UV logo
+  // depois, tudo contíguo).
+  const bool nv12 = vk_format == ipc::kVkFormatNv12;
+  const uint32_t stride = nv12 ? src_stride : width * 4;
+  const uint64_t need = nv12 ? uint64_t(stride) * height * 3 / 2 : uint64_t(stride) * height;
   std::lock_guard lk(video_mu_);
   if (!video_ring_ || video_ring_->slot_bytes < need) {
     // Primeiro quadro ou janela maior: buffer novo, com folga para pequenos
@@ -401,17 +403,30 @@ bool Runtime::video_write(const void *src, uint32_t width, uint32_t height, uint
   uint8_t *dst = video_slot(video_ring_, slot);
   const auto *s8 = static_cast<const uint8_t *>(src);
   if (src_stride == stride) {
-    std::memcpy(dst, s8, size_t(need));
+    std::memcpy(dst, s8, size_t(need));  // NV12 sempre cai aqui
   } else {
     for (uint32_t y = 0; y < height; ++y) std::memcpy(dst + size_t(y) * stride, s8 + size_t(y) * src_stride, stride);
   }
   video_ring_->state[slot].store(kSlotFilled, std::memory_order_release);
   ipc::VideoFrame vf{video_generation_, slot, present_ns, width, height, vk_format, stride, flags, video_dropped_};
-  if (enqueue(ipc::MsgType::VideoFrame, &vf, sizeof vf))
+  if (enqueue(ipc::MsgType::VideoFrame, &vf, sizeof vf)) {
     video_dropped_ = 0;
-  else
+    ++video_cost_.frames;
+  } else
     video_ring_->state[slot].store(kSlotFree, std::memory_order_release);
   return true;
+}
+
+void Runtime::add_video_cost(uint64_t ns) {
+  if (!video_active()) return;
+  std::lock_guard lk(video_mu_);
+  video_cost_.cpu_ns += ns;
+  video_cost_.max_ns = std::max(video_cost_.max_ns, ns);
+  // ~0,5 s a 60 fps: o daemon perde no máximo isso ao parar.
+  if (video_cost_.frames >= 30) {
+    enqueue(ipc::MsgType::VideoCost, &video_cost_, sizeof video_cost_);
+    video_cost_ = {};
+  }
 }
 
 void Runtime::shutdown() {
@@ -586,7 +601,10 @@ void Runtime::handle_message(ipc::Message &m) {
         pending_.captures.push_back({p->request_id, p->include_overlay != 0, p->issued_ns});
       break;
     case ipc::MsgType::VideoStart:
-      if (const auto *p = m.as<ipc::VideoStart>(); p && p->fps >= 1 && p->fps <= 240) pending_.video_fps = p->fps;
+      if (const auto *p = m.as<ipc::VideoStart>(); p && p->fps >= 1 && p->fps <= 240) {
+        video_mode_.store(p->mode, std::memory_order_relaxed);
+        pending_.video_fps = p->fps;
+      }
       break;
     case ipc::MsgType::VideoStop: pending_.video_fps = 0; break;
     case ipc::MsgType::Config:
