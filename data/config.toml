@@ -10,7 +10,7 @@ benchmark          = "F11"
 overlay            = "F12"         # mostra/oculta o overlay no canto de [overlay] corner
 overlay_corner     = "Shift+F12"   # alterna o canto: TL → TR → BR → BL
 screenshot         = "F10"
-video              = "F9"          # gravação ainda não disponível nesta versão
+video              = "F9"          # inicia/para a gravação do jogo
 loop_save          = ""
 push_to_talk       = ""
 backend            = "auto"        # auto | x11 | ingame  (portal/evdev: futuros)
@@ -37,6 +37,17 @@ format             = "png"         # png | jpeg | bmp | tga
 jpeg_quality       = 92
 include_overlay    = false
 repeat_every_s     = 0             # > 0: a hotkey liga/desliga capturas a cada N s
+
+[video]
+folder             = "$XDG_VIDEOS_DIR/framux"
+fps                = 60            # 1..240 (quadros a mais são descartados, os que faltam repetidos)
+scale              = "full"        # full | half
+encoder            = "auto"        # auto | av1_hw | av1_sw | h264_hw | x264 | utvideo
+quality            = "high"        # low | medium | high | lossless (força utvideo)
+container          = "mkv"         # mkv | mp4 (grava em MKV e converte ao parar)
+
+[audio]
+game               = true          # som do processo do jogo (PipeWire), trilha "Game"
 
 [stats_export]
 enabled            = true          # $XDG_RUNTIME_DIR/framux/stats + sinal D-Bus StatsChanged
