@@ -173,6 +173,18 @@ struct PendingRead {
   uint64_t present_ns = 0;
 };
 
+// Gravação: anel de PBOs lidos um ou mais quadros depois (§A.12: o FRAPS
+// usa 3 PBOs no OpenGL pelo mesmo motivo).
+constexpr int kVideoPbos = 3;
+
+struct VideoRead {
+  GLuint pbo = 0;
+  GLsync fence = nullptr;
+  uint32_t width = 0, height = 0;
+  uint64_t present_ns = 0;
+  uint64_t seq = 0;  // ordem de leitura; 0 = livre
+};
+
 struct Ctx {
   bool loaded = false;
   bool usable = false;
@@ -186,6 +198,8 @@ struct Ctx {
   bool has_pbo_async = false;  // PBO + fence sync
   GlFns f{};
   PendingRead pending;
+  VideoRead video[kVideoPbos];
+  uint64_t video_seq = 0;
   bool info_sent = false;
 };
 
@@ -436,6 +450,8 @@ int make_memfd(const void *data, size_t size) {
   return fd;
 }
 
+constexpr uint32_t kVkFormatRgba8 = 37;  // VK_FORMAT_R8G8B8A8_UNORM
+
 void send_pixels(const client::CaptureRequest &req, const void *data, uint32_t w, uint32_t h, uint64_t present_ns) {
   Runtime &rt = Runtime::get();
   const size_t size = size_t(w) * h * 4;
@@ -449,7 +465,7 @@ void send_pixels(const client::CaptureRequest &req, const void *data, uint32_t w
   img.present_ns = present_ns;
   img.width = w;
   img.height = h;
-  img.vk_format = 37;  // VK_FORMAT_R8G8B8A8_UNORM
+  img.vk_format = kVkFormatRgba8;
   img.stride = w * 4;
   img.size = size;
   img.flags = ipc::kImgFlipY;
@@ -508,6 +524,68 @@ void poll_capture(Ctx &c) {
   p.req = {};
 }
 
+// Entrega à gravação os PBOs já lidos, do mais antigo para o mais novo.
+void poll_video(Ctx &c) {
+  const GlFns &f = c.f;
+  for (;;) {
+    VideoRead *oldest = nullptr;
+    for (VideoRead &v : c.video)
+      if (v.seq && v.fence && (!oldest || v.seq < oldest->seq)) oldest = &v;
+    if (!oldest) return;
+    const GLenum st = f.ClientWaitSync(oldest->fence, 0, 0);
+    if (st != GL_ALREADY_SIGNALED && st != GL_CONDITION_SATISFIED) return;
+    f.DeleteSync(oldest->fence);
+    oldest->fence = nullptr;
+    oldest->seq = 0;
+    GLint prev = 0;
+    f.GetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prev);
+    f.BindBuffer(GL_PIXEL_PACK_BUFFER, oldest->pbo);
+    const size_t size = size_t(oldest->width) * oldest->height * 4;
+    if (const void *data = f.MapBufferRange(GL_PIXEL_PACK_BUFFER, 0, GLsizeiptr(size), GL_MAP_READ_BIT)) {
+      Runtime::get().video_write(data, oldest->width, oldest->height, oldest->width * 4, kVkFormatRgba8, ipc::kImgFlipY,
+                                 oldest->present_ns);
+      f.UnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+    f.BindBuffer(GL_PIXEL_PACK_BUFFER, GLuint(prev));
+  }
+}
+
+// Lê o backbuffer para a gravação: num PBO livre (sem nenhum, o quadro fica de
+// fora) ou, sem PBO + fence, de forma síncrona.
+void start_video_read(Ctx &c, uint32_t w, uint32_t h, uint64_t present_ns) {
+  const GlFns &f = c.f;
+  if (!f.ReadPixels || !f.PixelStorei) return;
+  SavedReadState s;
+  const bool pbo = c.has_pbo_async;
+  if (pbo) {
+    VideoRead *slot = nullptr;
+    for (VideoRead &v : c.video)
+      if (!v.seq) {
+        slot = &v;
+        break;
+      }
+    if (!slot) return;
+    begin_read(c, s, true);
+    if (!slot->pbo) f.GenBuffers(1, &slot->pbo);
+    f.BindBuffer(GL_PIXEL_PACK_BUFFER, slot->pbo);
+    if (slot->width != w || slot->height != h)
+      f.BufferData(GL_PIXEL_PACK_BUFFER, GLsizeiptr(size_t(w) * h * 4), nullptr, GL_STREAM_READ);
+    f.ReadPixels(0, 0, GLsizei(w), GLsizei(h), GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    slot->fence = f.FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    slot->width = w;
+    slot->height = h;
+    slot->present_ns = present_ns;
+    slot->seq = ++c.video_seq;
+    end_read(c, s, true);
+    return;
+  }
+  std::vector<uint8_t> buf(size_t(w) * h * 4);
+  begin_read(c, s, false);
+  f.ReadPixels(0, 0, GLsizei(w), GLsizei(h), GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
+  end_read(c, s, false);
+  Runtime::get().video_write(buf.data(), w, h, w * 4, kVkFormatRgba8, ipc::kImgFlipY, present_ns);
+}
+
 // ---------------------------------------------------------------------------
 // Present comum a GLX e EGL
 
@@ -551,6 +629,9 @@ void on_swap(ipc::Api api, const void *ctx_key, uintptr_t drawable, uint32_t w, 
     return;
   }
   poll_capture(*c);
+  poll_video(*c);
+  // O vídeo sai sem o contador, como o screenshot padrão.
+  if (res.video) start_video_read(*c, w, h, present_ns);
   if (res.capture && !res.capture->include_overlay) start_capture(*c, *res.capture, w, h, present_ns);
   if (res.draw) draw_overlay(*c, *res.draw, w, h);
   if (res.capture && res.capture->include_overlay) start_capture(*c, *res.capture, w, h, present_ns);
