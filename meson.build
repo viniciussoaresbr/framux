@@ -1,5 +1,5 @@
 project('framux', ['c', 'cpp'],
-  version : '0.3.8',
+  version : '0.4.1',
   license : 'MIT',
   meson_version : '>= 1.1.0',
   default_options : [

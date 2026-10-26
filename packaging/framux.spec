@@ -4,9 +4,9 @@
 %bcond tests 0
 
 Name:           framux
-Version:        0.3.8
+Version:        0.4.1
 Release:        1%{?dist}
-Summary:        Contador de FPS, benchmark e screenshots para jogos no Linux
+Summary:        Contador de FPS, benchmark, screenshots e gravação para jogos no Linux
 License:        MIT
 URL:            https://github.com/viniciussoaresbr/framux
 Source0:        %{name}-%{version}.tar.gz
@@ -27,6 +27,8 @@ BuildRequires:  libpng-devel
 BuildRequires:  libjpeg-turbo-devel
 BuildRequires:  systemd-devel
 BuildRequires:  systemd-rpm-macros
+BuildRequires:  ffmpeg-free-devel
+BuildRequires:  pipewire-devel
 BuildRequires:  qt6-qtbase-devel
 BuildRequires:  desktop-file-utils
 %if %{with tests}
@@ -40,8 +42,8 @@ Recommends:     %{name}-layer(x86-32)
 %description
 Framux é uma alternativa nativa ao FRAPS para Linux: contador de FPS dentro
 do jogo (Vulkan, OpenGL e todo Direct3D via Proton/DXVK/VKD3D), benchmark por
-hotkey com CSV moderno e screenshots.
-Janela de configuração com abas Geral, FPS e Capturas, ícone na bandeja
+hotkey com CSV moderno, screenshots e gravação do jogo com o áudio dele.
+Janela de configuração com abas Geral, FPS, Gravações e Capturas, ícone na bandeja
 e modo automático para jogos da Steam/Proton, inclusive o Steam Flatpak.
 Sem rede e sem telemetria.
 
@@ -105,6 +107,25 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.framux.desk
 %{_datadir}/vulkan/implicit_layer.d/framux_*.json
 
 %changelog
+* Sun Oct 25 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.1-1
+- Gravação: conversão de cor em paralelo e numa thread separada do encoder,
+  com fila de quadros; quase nenhum quadro descartado em 2560x1080 a 60 fps
+- Automático passa a preferir AV1 (placa de vídeo, depois SVT-AV1): o Fedora
+  sem RPM Fusion decodifica H.264 devagar demais para alta resolução
+- HEVC removido das opções (sem decodificador no Fedora); configs antigas
+  voltam ao automático
+- Sem perda passa de FFV1 para Ut Video: ~6x mais rápido, cabe em tempo
+  real em 2560x1080 a 60 fps
+
+* Sun Oct 25 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.0-1
+- Gravação do jogo (F9 inicia/para, `framux rec`): Vulkan e OpenGL, encoder
+  por hardware (NVENC/VA-API) com fallback para SVT-AV1/FFV1, taxa constante,
+  tamanho cheio ou metade, MKV com conversão opcional para MP4
+- Áudio só do processo do jogo pelo PipeWire, em trilha Opus
+- Nova aba Gravações na janela; contador vermelho e selo vermelho na bandeja
+  enquanto grava
+- Protocolo IPC 2: camada e daemon precisam ser atualizados juntos
+
 * Sat Oct 24 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.3.8-1
 - Abas em português: Geral, FPS e Capturas (seção Capturas de Tela)
 
