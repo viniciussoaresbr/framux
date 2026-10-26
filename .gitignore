@@ -1,6 +1,7 @@
 /build*/
 /subprojects/packagecache/
 *.rpm
+!/rpm/*.rpm
 *.tar.gz
 compile_commands.json
 .cache/
