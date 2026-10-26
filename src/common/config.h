@@ -68,15 +68,15 @@ struct Config {
     double repeat_every_s = 0;
   } screenshot;
 
-  // Lida e validada para manter o arquivo estável; a gravação de vídeo
-  // ainda não existe nesta versão.
+  // Gravação de vídeo (§B.7). Loop, split, lock_fps e cursor são lidos e
+  // validados mas ainda não têm efeito.
   struct Video {
     std::string folder = "$XDG_VIDEOS_DIR/framux";
     int fps = 60;
-    std::string scale = "full";
-    std::string encoder = "auto";
-    std::string quality = "high";
-    std::string container = "mkv";
+    std::string scale = "full";     // full | half
+    std::string encoder = "auto";   // auto | av1_hw | av1_sw | h264_hw | x264 | utvideo
+    std::string quality = "high";   // low | medium | high | lossless (força utvideo)
+    std::string container = "mkv";  // mkv | mp4 (grava em MKV e faz remux ao parar)
     int split_every_mb = 0;
     bool lock_fps = false;
     bool capture_cursor = true;

@@ -12,7 +12,7 @@
 namespace framux::ipc {
 
 // Incrementar a cada mudança incompatível de mensagens ou do ring.
-inline constexpr uint32_t kProtoVersion = 1;
+inline constexpr uint32_t kProtoVersion = 2;  // 2: gravação de vídeo
 
 // Comandos mais velhos que isso são descartados pela camada (§C.3.3).
 inline constexpr uint64_t kCommandTtlNs = 2'000'000'000ull;
@@ -28,6 +28,8 @@ enum class MsgType : uint32_t {
   Stats = 5,
   Bye = 6,
   Error = 7,
+  VideoBuffer = 8,
+  VideoFrame = 9,
   // daemon → camada
   Welcome = 100,
   Reject = 101,
@@ -112,6 +114,35 @@ struct CaptureFrame {
   uint32_t _pad;
 };
 
+// Inicia a gravação: a camada passa a copiar quadros do swapchain principal
+// a no máximo `fps` por segundo para o buffer de vídeo (video_ring.h).
+struct VideoStart {
+  uint64_t issued_ns;
+  uint32_t fps;
+  uint32_t _pad;
+};
+
+// Buffer de quadros criado (ou trocado, se o tamanho mudou) pela camada.
+struct VideoBuffer {
+  uint32_t generation;
+  uint32_t _pad;
+  // + fd (SCM_RIGHTS): memfd com VideoRingHeader e os slots
+};
+
+// Quadro pronto no slot `slot` do buffer `generation`. O daemon devolve o
+// slot zerando o estado dele no cabeçalho compartilhado.
+struct VideoFrame {
+  uint32_t generation;
+  uint32_t slot;
+  uint64_t present_ns;
+  uint32_t width;
+  uint32_t height;
+  uint32_t vk_format;
+  uint32_t stride;
+  uint32_t flags;    // FrameImageFlags
+  uint32_t dropped;  // quadros descartados pela camada desde o anterior
+};
+
 struct ConfigMsg {
   uint32_t config_len;  // TOML que segue
   uint32_t _pad;
@@ -161,5 +192,6 @@ struct ErrorMsg {
 static_assert(sizeof(Hello) == 912);
 static_assert(sizeof(FrameImage) == 48);
 static_assert(sizeof(Welcome) == 16);
+static_assert(sizeof(VideoFrame) == 40);
 
 }  // namespace framux::ipc

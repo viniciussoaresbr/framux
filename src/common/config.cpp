@@ -247,7 +247,17 @@ Schema make_schema(Config &cfg) {
        {{"folder", string(v.folder)},
         {"fps", integer(v.fps, 1, 240)},
         {"scale", choice(v.scale, {"full", "half"})},
-        {"encoder", choice(v.encoder, {"auto", "av1_hw", "hevc_hw", "h264_hw", "ffv1", "x264"})},
+        {"encoder",
+         [&v](const toml::node &n, const std::string &k, const Ctx &c) {
+           // Saíram na 0.4.1: HEVC (o Fedora não decodifica) volta ao
+           // automático; FFV1 (lento demais para tempo real) vira Ut Video.
+           const auto old = n.value<std::string>();
+           if (old == "hevc_hw" || old == "ffv1") {
+             v.encoder = *old == "ffv1" ? "utvideo" : "auto";
+             return;
+           }
+           choice(v.encoder, {"auto", "av1_hw", "av1_sw", "h264_hw", "x264", "utvideo"})(n, k, c);
+         }},
         {"quality", choice(v.quality, {"low", "medium", "high", "lossless"})},
         {"container", choice(v.container, {"mkv", "mp4"})},
         {"split_every_mb", integer(v.split_every_mb, 0, 1 << 30)},
