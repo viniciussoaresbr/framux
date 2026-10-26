@@ -23,6 +23,7 @@
 #include "common/ipc_socket.h"
 #include "common/overlay.h"
 #include "common/ring.h"
+#include "common/video_ring.h"
 
 namespace framux::client {
 
@@ -37,6 +38,7 @@ struct CaptureRequest {
 struct PresentResult {
   const OverlayDraw *draw = nullptr;  // nullptr = nada a desenhar
   std::optional<CaptureRequest> capture;
+  bool video = false;  // copiar este quadro (antes do overlay) para a gravação
 };
 
 class Runtime {
@@ -69,6 +71,14 @@ class Runtime {
   void send_frame_image(const ipc::FrameImage &img, int memfd);
   void send_capture_error(uint64_t request_id, const char *msg);
 
+  // Gravação: copia um quadro lido da GPU para um slot livre do buffer de
+  // vídeo e avisa o daemon. `src` tem `height` linhas de `src_stride` bytes.
+  // Sem slot livre (encoder atrasado), descarta. Devolve false se a gravação
+  // não está ativa (o quadro chegou depois do VIDEO_STOP).
+  bool video_write(const void *src, uint32_t width, uint32_t height, uint32_t src_stride, uint32_t vk_format,
+                   uint32_t flags, uint64_t present_ns);
+  bool video_active() const { return video_fps_.load(std::memory_order_relaxed) != 0; }
+
   void shutdown();
 
  private:
@@ -92,7 +102,9 @@ class Runtime {
   void disconnect(int sock);
   void drop_outgoing();
   void handle_message(ipc::Message &m);
-  void enqueue(ipc::MsgType type, const void *body, size_t len, int fd = -1);
+  bool enqueue(ipc::MsgType type, const void *body, size_t len, int fd = -1);
+  void set_video_locked(uint32_t fps, uint64_t now);
+  void release_video_ring();
   void apply_config_locked(const Config &cfg);
   void poll_input(uint64_t now);
   void on_hotkey(int action, const Hotkey &hk, bool pressed, uint64_t now);
@@ -126,6 +138,16 @@ class Runtime {
   int last_focus_ = -1;
   uint64_t overlay_cpu_ns_ = 0, overlay_frames_ = 0;
 
+  // Gravação: ritmo (present_lock_) e buffer compartilhado (video_mu_).
+  std::atomic<uint32_t> video_fps_{0};
+  uint64_t video_period_ns_ = 0;
+  uint64_t video_due_ns_ = 0;
+  std::mutex video_mu_;
+  VideoRingHeader *video_ring_ = nullptr;
+  size_t video_ring_size_ = 0;
+  uint32_t video_generation_ = 0;
+  uint32_t video_dropped_ = 0;
+
   // Comandos recebidos pela thread de IPC, consumidos no present.
   std::mutex pending_mu_;
   struct Pending {
@@ -139,6 +161,7 @@ class Runtime {
     std::deque<CaptureRequest> captures;
     std::optional<std::string> config_toml;
     std::optional<bool> connected;
+    std::optional<uint32_t> video_fps;  // 0 = parar
     bool any = false;
   } pending_;
 

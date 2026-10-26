@@ -1,5 +1,6 @@
 #include "client/runtime.h"
 
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sys/eventfd.h>
@@ -17,6 +18,7 @@
 #include "common/ipc_socket.h"
 #include "common/log.h"
 #include "common/paths.h"
+#include "common/video_ring.h"
 
 namespace framux::client {
 
@@ -190,6 +192,7 @@ void Runtime::on_present(uint32_t swapchain_id, uint32_t width, uint32_t height,
       if (apply_config_toml(c, *p.config_toml, "framuxd", &warnings)) apply_config_locked(c);
     }
     if (p.corner) overlay_.set_corner(*p.corner);
+    if (p.video_fps) set_video_locked(*p.video_fps, now);
     // Comandos velhos (jogo pausado ou travado) são descartados aqui, no
     // present, e não na chegada: é o present que para quando o jogo pausa.
     auto fresh = [now](uint64_t issued) { return issued == 0 || now < issued || now - issued <= ipc::kCommandTtlNs; };
@@ -229,6 +232,13 @@ void Runtime::on_present(uint32_t swapchain_id, uint32_t width, uint32_t height,
       captures_.pop_front();
       out.capture = c;
       break;
+    }
+    // No máximo `fps` quadros por segundo; o daemon repete ou descarta para
+    // chegar à taxa constante do vídeo.
+    if (video_period_ns_ && now >= video_due_ns_) {
+      out.video = true;
+      video_due_ns_ += video_period_ns_;
+      if (video_due_ns_ < now) video_due_ns_ = now;
     }
   }
 
@@ -297,19 +307,20 @@ void Runtime::on_hotkey(int action, const Hotkey &hk, bool pressed, uint64_t now
     overlay_.show_unavailable(now);
 }
 
-void Runtime::enqueue(ipc::MsgType type, const void *body, size_t len, int fd) {
+bool Runtime::enqueue(ipc::MsgType type, const void *body, size_t len, int fd) {
   Outgoing o{type, std::vector<uint8_t>(static_cast<const uint8_t *>(body), static_cast<const uint8_t *>(body) + len),
              fd};
   {
     std::lock_guard lk(out_mu_);
     if (out_.size() > 64) {  // daemon travado: descarta em vez de crescer
       if (fd >= 0) close(fd);
-      return;
+      return false;
     }
     out_.push_back(std::move(o));
   }
   const uint64_t one = 1;
   if (wake_fd_ >= 0) (void)!write(wake_fd_, &one, sizeof one);
+  return true;
 }
 
 void Runtime::send_frame_image(const ipc::FrameImage &img, int memfd) {
@@ -321,6 +332,86 @@ void Runtime::send_capture_error(uint64_t request_id, const char *msg) {
   e.request_id = request_id;
   std::strncpy(e.message, msg, sizeof e.message - 1);
   enqueue(ipc::MsgType::Error, &e, sizeof e);
+}
+
+void Runtime::set_video_locked(uint32_t fps, uint64_t now) {
+  if (fps == video_fps_.load(std::memory_order_relaxed)) return;
+  video_fps_.store(fps, std::memory_order_relaxed);
+  video_period_ns_ = fps ? kNsPerSec / fps : 0;
+  video_due_ns_ = now;
+  if (!fps) release_video_ring();
+  FRAMUX_DEBUG(fps ? "gravação iniciada (%u fps)" : "gravação parada", fps);
+}
+
+void Runtime::release_video_ring() {
+  std::lock_guard lk(video_mu_);
+  if (video_ring_) munmap(video_ring_, video_ring_size_);
+  video_ring_ = nullptr;
+  video_ring_size_ = 0;
+  video_dropped_ = 0;
+}
+
+bool Runtime::video_write(const void *src, uint32_t width, uint32_t height, uint32_t src_stride, uint32_t vk_format,
+                          uint32_t flags, uint64_t present_ns) {
+  if (!video_active()) return false;
+  const uint32_t bpp = 4;  // a camada só grava formatos de 32 bits por pixel
+  const uint32_t stride = width * bpp;
+  const uint64_t need = uint64_t(stride) * height;
+  std::lock_guard lk(video_mu_);
+  if (!video_ring_ || video_ring_->slot_bytes < need) {
+    // Primeiro quadro ou janela maior: buffer novo, com folga para pequenos
+    // redimensionamentos. O daemon mantém o antigo até largar os slots dele.
+    if (video_ring_) munmap(video_ring_, video_ring_size_);
+    video_ring_ = nullptr;
+    const uint64_t slot_bytes = (need + need / 8 + 4095) & ~uint64_t(4095);
+    const size_t bytes = video_ring_bytes(slot_bytes);
+    const int fd = memfd_create("framux-video", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    void *map = MAP_FAILED;
+    if (fd >= 0 && ftruncate(fd, off_t(bytes)) == 0)
+      map = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+      if (fd >= 0) close(fd);
+      FRAMUX_LOG_ONCE("sem memória para o buffer de vídeo (%zu MB)", bytes >> 20);
+      return true;
+    }
+    fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL);
+    video_ring_ = static_cast<VideoRingHeader *>(map);
+    video_ring_size_ = bytes;
+    video_ring_->magic = kVideoRingMagic;
+    video_ring_->slot_count = kVideoSlots;
+    video_ring_->slot_bytes = slot_bytes;
+    for (auto &st : video_ring_->state) st.store(kSlotFree, std::memory_order_relaxed);
+    ipc::VideoBuffer vb{++video_generation_, 0};
+    if (!enqueue(ipc::MsgType::VideoBuffer, &vb, sizeof vb, fd)) {
+      munmap(video_ring_, video_ring_size_);
+      video_ring_ = nullptr;
+      return true;
+    }
+  }
+  uint32_t slot = kVideoSlots;
+  for (uint32_t i = 0; i < kVideoSlots; ++i)
+    if (video_ring_->state[i].load(std::memory_order_acquire) == kSlotFree) {
+      slot = i;
+      break;
+    }
+  if (slot == kVideoSlots) {
+    ++video_dropped_;
+    return true;
+  }
+  uint8_t *dst = video_slot(video_ring_, slot);
+  const auto *s8 = static_cast<const uint8_t *>(src);
+  if (src_stride == stride) {
+    std::memcpy(dst, s8, size_t(need));
+  } else {
+    for (uint32_t y = 0; y < height; ++y) std::memcpy(dst + size_t(y) * stride, s8 + size_t(y) * src_stride, stride);
+  }
+  video_ring_->state[slot].store(kSlotFilled, std::memory_order_release);
+  ipc::VideoFrame vf{video_generation_, slot, present_ns, width, height, vk_format, stride, flags, video_dropped_};
+  if (enqueue(ipc::MsgType::VideoFrame, &vf, sizeof vf))
+    video_dropped_ = 0;
+  else
+    video_ring_->state[slot].store(kSlotFree, std::memory_order_release);
+  return true;
 }
 
 void Runtime::shutdown() {
@@ -418,8 +509,12 @@ void Runtime::disconnect(int sock) {
   }
   if (ring) munmap(ring, size);
   close(sock);
+  // Sem daemon não há quem codifique: a gravação para (o daemon fecha o
+  // arquivo ao perder a conexão) e o próximo daemon recebe um buffer novo.
+  release_video_ring();
   std::lock_guard pl(pending_mu_);
   pending_.connected = false;
+  pending_.video_fps = 0;
   pending_.any = true;
 }
 
@@ -490,6 +585,10 @@ void Runtime::handle_message(ipc::Message &m) {
       if (const auto *p = m.as<ipc::CaptureFrame>())
         pending_.captures.push_back({p->request_id, p->include_overlay != 0, p->issued_ns});
       break;
+    case ipc::MsgType::VideoStart:
+      if (const auto *p = m.as<ipc::VideoStart>(); p && p->fps >= 1 && p->fps <= 240) pending_.video_fps = p->fps;
+      break;
+    case ipc::MsgType::VideoStop: pending_.video_fps = 0; break;
     case ipc::MsgType::Config:
       if (const auto *p = m.as<ipc::ConfigMsg>())
         pending_.config_toml = m.tail<ipc::ConfigMsg>().substr(0, p->config_len);
