@@ -1,6 +1,6 @@
 # Framux
 
-Alternativa nativa ao FRAPS para Linux (Fedora): contador de FPS dentro do
+Ferramenta nativa para Linux (Fedora) com contador de FPS dentro do
 jogo, benchmark por hotkey com CSV moderno, screenshots e gravação do jogo
 com o áudio dele. Funciona com Vulkan, OpenGL e todo Direct3D via
 Proton/DXVK/VKD3D/WineD3D, em X11 e Wayland.
@@ -126,7 +126,7 @@ Hotkeys padrão: **F11** benchmark, **F12** mostra/oculta o overlay (sempre no
 canto escolhido na janela), **Shift+F12** leva o overlay ao próximo canto,
 **F10** screenshot, **F9** inicia/para a gravação. O overlay mostra só o número de FPS em fonte de segmentos própria;
 no primeiro segundo do benchmark aparece uma caixa verde, depois o contador
-some (como no FRAPS) e, ao terminar, o FPS médio aparece em branco sobre
+some e, ao terminar, o FPS médio aparece em branco sobre
 vermelho por 1 s. Screenshots piscam a caixa em branco. Enquanto grava, o
 contador fica vermelho (o vídeo sai sem ele) e o ícone da bandeja ganha um
 selo vermelho.
@@ -145,9 +145,6 @@ Benchmarks em `~/.local/share/framux/benchmarks`:
 - `… summary.json` — avg/min/max, percentis p50–p99, 1 % e 0,1 % low
   (`"low_definition":"mean_of_worst"`), API, camada (dxvk/vkd3d/…), GPU;
 - `benchmarks.log` — uma linha legível por benchmark.
-
-A cópia no formato do FRAPS (`fraps_compat`) foi removida na 0.3.4;
-a chave ainda é aceita na config, sem efeito.
 
 Screenshots em `$XDG_PICTURES_DIR/framux/<jogo> AAAA-MM-DD HH-MM-SS-cc.png`.
 Swapchains de 10 bits e FP16 (HDR) geram PNG de 16 bits.
@@ -313,13 +310,11 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits.
   app Vulkan, e ela só age em jogos (Steam, Wine/Proton ou `[filters]
   include`). Nos demais (apps GTK 4, navegadores) fica transparente: nenhuma
   função de swapchain ou present é interceptada.
-- **GUI**: abas Geral, FPS, Gravações e Capturas no topo, na ordem das abas
-  do FRAPS (General, FPS, Movies, Screenshots). Sem moc (callbacks em vez de
+- **GUI**: abas Geral, FPS, Gravações e Capturas no topo. Sem moc (callbacks em vez de
   signals/slots próprios). Fechar a janela nunca para o monitoramento, que é
   do daemon; "Parar o Framux" para o daemon e fecha a janela.
 - **Gravação por cópia em memória compartilhada.** A camada copia o quadro
-  para um buffer *host-visible* (Vulkan) ou um anel de 3 PBOs (OpenGL, como o
-  FRAPS) e daí para um de 4 slots num memfd compartilhado; o daemon converte
+  para um buffer *host-visible* (Vulkan) ou um anel de 3 PBOs (OpenGL) e daí para um de 4 slots num memfd compartilhado; o daemon converte
   (swscale em fatias paralelas, BT.709) numa thread e devolve o slot na hora;
   outra thread codifica, com até 16 quadros convertidos na fila entre as
   duas para absorver a abertura do encoder e os picos do SVT-AV1. Sem slot
@@ -347,10 +342,8 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits.
   `org.freedesktop.Platform.VulkanLayer.*` exigiria publicar no Flathub; as
   cópias em `~/.var/app` ficam no mesmo caminho dentro do sandbox e dos
   containers da Steam (pressure-vessel) e funcionam com o RPM.
-- **Anel do contador com 32 768 posições** (≥ 16 384 exigido), para medir
-  20 000 fps sem saturar (teste 14).
-- **Sem exportação no formato do FRAPS**: removida a pedido na 0.3.4; os
-  arquivos nativos (CSV + summary.json) trazem mais dados (1% low, GPU, API).
+- **Anel do contador com 32 768 posições**, para medir 20 000 fps sem
+  saturar.
 - **`fps.csv` só com segundos completos**; com menos de 1 s de benchmark,
   min/max ficam 0.
 - **1 % low** = 1000 / média dos ⌊n·1 %⌋ piores frame times (mínimo um).
@@ -380,7 +373,7 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits.
   OpenGL nativo precisa de `framux run`, porque injetar `LD_PRELOAD` na sessão
   inteira afetaria todos os programas.
 - `timing = "displayed"` (present_wait/present timing) ainda não implementado;
-  o benchmark usa o instante do present, como o FRAPS.
+  o benchmark usa o instante do present.
 - Jogos com janela Wayland nativa não recebem hotkeys (use a CLI).
 - Jogos nativos com anti-cheat podem recusar `LD_PRELOAD` (`FRAMUX_NO_GL=1`
   ou `[filters]`); a camada Vulkan costuma ser aceita sob Proton.
