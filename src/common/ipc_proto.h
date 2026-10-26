@@ -30,6 +30,7 @@ enum class MsgType : uint32_t {
   Error = 7,
   VideoBuffer = 8,
   VideoFrame = 9,
+  VideoCost = 10,  // daemons anteriores ignoram (mensagem desconhecida)
   // daemon → camada
   Welcome = 100,
   Reject = 101,
@@ -116,10 +117,20 @@ struct CaptureFrame {
 
 // Inicia a gravação: a camada passa a copiar quadros do swapchain principal
 // a no máximo `fps` por segundo para o buffer de vídeo (video_ring.h).
+// Como a camada pode entregar os quadros (0.4.2+; antes, sempre RGB inteiro).
+enum VideoModeFlags : uint32_t {
+  kVideoYuv = 1u << 0,   // NV12 BT.709 convertido na GPU (o encoder não é RGB)
+  kVideoHalf = 1u << 1,  // e já na metade do tamanho
+};
+
+// VkFormat de um quadro NV12: plano Y (stride × altura) seguido do UV
+// intercalado (stride × altura/2).
+inline constexpr uint32_t kVkFormatNv12 = 1000156003;  // VK_FORMAT_G8_B8R8_2PLANE_420_UNORM
+
 struct VideoStart {
   uint64_t issued_ns;
   uint32_t fps;
-  uint32_t _pad;
+  uint32_t mode;  // VideoModeFlags
 };
 
 // Buffer de quadros criado (ou trocado, se o tamanho mudou) pela camada.
@@ -143,13 +154,23 @@ struct VideoFrame {
   uint32_t dropped;  // quadros descartados pela camada desde o anterior
 };
 
+// Custo da gravação na thread do jogo (ler a cópia da GPU e copiar para o
+// slot), acumulado desde a última VideoCost.
+struct VideoCost {
+  uint64_t cpu_ns;  // soma
+  uint64_t max_ns;  // pior quadro
+  uint32_t frames;  // quadros entregues
+  uint32_t _pad;
+};
+
 struct ConfigMsg {
   uint32_t config_len;  // TOML que segue
   uint32_t _pad;
 };
 
 enum FrameImageFlags : uint32_t {
-  kImgFlipY = 1u << 0,  // linhas de baixo para cima (glReadPixels)
+  kImgFlipY = 1u << 0,   // linhas de baixo para cima (glReadPixels)
+  kImgHalved = 1u << 1,  // gravação: já reduzido à metade na GPU
 };
 
 struct FrameImage {
@@ -193,5 +214,6 @@ static_assert(sizeof(Hello) == 912);
 static_assert(sizeof(FrameImage) == 48);
 static_assert(sizeof(Welcome) == 16);
 static_assert(sizeof(VideoFrame) == 40);
+static_assert(sizeof(VideoCost) == 24);
 
 }  // namespace framux::ipc
