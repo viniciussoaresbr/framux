@@ -10,7 +10,7 @@ namespace framux::gui {
 // Aplica o tema escuro à aplicação inteira.
 void apply_theme();
 
-// Ícone do programa (framux-icons/, embutido nos recursos :/framux).
+// Ícone do programa (assets/icons/, embutido nos recursos :/framux).
 // `state`: 0 ocioso, 1 benchmark (selo verde no canto), 2 gravando (selo
 // vermelho, como o ícone do FRAPS durante a gravação).
 QIcon app_icon(int state = 0);

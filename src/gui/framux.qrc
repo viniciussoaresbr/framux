@@ -1,14 +1,14 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
   <qresource prefix="/framux">
-    <file alias="framux-16.png">../../framux-icons/png/framux-16.png</file>
-    <file alias="framux-24.png">../../framux-icons/png/framux-24.png</file>
-    <file alias="framux-32.png">../../framux-icons/png/framux-32.png</file>
-    <file alias="framux-48.png">../../framux-icons/png/framux-48.png</file>
-    <file alias="framux-64.png">../../framux-icons/png/framux-64.png</file>
-    <file alias="framux-128.png">../../framux-icons/png/framux-128.png</file>
-    <file alias="framux-256.png">../../framux-icons/png/framux-256.png</file>
-    <file alias="framux-512.png">../../framux-icons/png/framux-512.png</file>
-    <file alias="wordmark.png">../../framux-icons/framux-wordmark.png</file>
+    <file alias="framux-16.png">../../assets/icons/png/framux-16.png</file>
+    <file alias="framux-24.png">../../assets/icons/png/framux-24.png</file>
+    <file alias="framux-32.png">../../assets/icons/png/framux-32.png</file>
+    <file alias="framux-48.png">../../assets/icons/png/framux-48.png</file>
+    <file alias="framux-64.png">../../assets/icons/png/framux-64.png</file>
+    <file alias="framux-128.png">../../assets/icons/png/framux-128.png</file>
+    <file alias="framux-256.png">../../assets/icons/png/framux-256.png</file>
+    <file alias="framux-512.png">../../assets/icons/png/framux-512.png</file>
+    <file alias="wordmark.png">../../assets/icons/framux-wordmark.png</file>
   </qresource>
 </RCC>

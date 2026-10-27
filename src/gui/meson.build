@@ -4,7 +4,7 @@ if not qt6_dep.found()
   subdir_done()
 endif
 
-# Ícone e nome embutidos no executável (framux-icons/). Vão como fonte em
+# Ícone e nome embutidos no executável (assets/icons/). Vão como fonte em
 # framux_gui_dep, não na biblioteca estática: lá o linker descartaria o objeto
 # que só registra os recursos.
 framux_res = import('qt6').compile_resources(sources : files('framux.qrc'))
