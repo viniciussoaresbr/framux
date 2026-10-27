@@ -129,11 +129,16 @@ case $SCENARIO in
     ;;
   reconnect)
     # Teste 10: sem daemon o jogo roda; quando o daemon sobe, a camada reconecta.
+    # A marca de "Parar o Framux" deixa a camada quieta até o daemon voltar.
+    mkdir -m700 -p "$XDG_RUNTIME_DIR/framux" && touch "$XDG_RUNTIME_DIR/framux/stopped"
     FRAMUX_AUTOSTART=0 start_app
     sleep 1.5
     kill -0 $AP || fail "o jogo morreu sem o daemon"
     start_daemon
+    [ ! -e "$XDG_RUNTIME_DIR/framux/stopped" ] || fail "o framuxd não apagou a marca de parado"
     wait_session
+    shot=$(framux shot --overlay) || fail "shot --overlay"
+    [ "$("$B/tests/png_probe" "$shot")" -gt 20 ] || fail "overlay não voltou depois de o daemon subir"
     kill $DP; wait $DP 2>/dev/null
     sleep 1
     kill -0 $AP || fail "o jogo morreu quando o daemon caiu"

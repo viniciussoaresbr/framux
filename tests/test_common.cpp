@@ -199,6 +199,35 @@ TEST_CASE("overlay: retângulos e cantos", "[overlay]") {
   REQUIRE_FALSE(d.visible);
 }
 
+TEST_CASE("overlay: gravar só muda a cor do contador", "[overlay]") {
+  Config::Overlay cfg;
+  cfg.show_frametime = true;
+  for (auto corner : {ipc::Corner::TopLeft, ipc::Corner::TopRight, ipc::Corner::BottomRight, ipc::Corner::BottomLeft}) {
+    cfg.corner = corner;
+    OverlayState st;
+    st.set_config(cfg);
+    const uint64_t t = 10'000'000'000ull;
+    const OverlayContent idle = st.compute(t, 60, 16'700'000);
+    st.on_indicators(ipc::kIndRecording, 0, t);
+    const OverlayContent rec = st.compute(t + 1, 60, 16'700'000);
+    REQUIRE(idle.color == cfg.color_normal);
+    REQUIRE(rec.color == cfg.color_recording);
+    REQUIRE(rec.text == idle.text);
+    REQUIRE(rec.subtext == idle.subtext);
+    REQUIRE_FALSE(rec.has_box);
+    OverlayDraw a, b;
+    build_overlay(idle, 1920, 1080, a);
+    build_overlay(rec, 1920, 1080, b);
+    REQUIRE(a.text.size() == b.text.size());
+    for (size_t i = 0; i < a.text.size(); ++i) {
+      REQUIRE(a.text[i].x == b.text[i].x);
+      REQUIRE(a.text[i].y == b.text[i].y);
+    }
+    st.on_indicators(0, 0, t + 2);
+    REQUIRE(st.compute(t + 3, 60, 16'700'000).color == cfg.color_normal);
+  }
+}
+
 TEST_CASE("overlay: indicadores do benchmark e do screenshot", "[overlay]") {
   OverlayState st;
   Config::Overlay cfg;
