@@ -4,7 +4,7 @@
 %bcond tests 0
 
 Name:           framux
-Version:        0.4.2
+Version:        0.4.3
 Release:        1%{?dist}
 Summary:        Contador de FPS, benchmark, screenshots e gravação para jogos no Linux
 License:        MIT
@@ -107,6 +107,11 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.framux.desk
 %{_datadir}/vulkan/implicit_layer.d/framux_*.json
 
 %changelog
+* Mon Oct 26 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.3-1
+- "Parar o Framux" também apaga o contador nos jogos: com o modo automático
+  a camada seguia desenhando sozinha; agora fica quieta até o Framux ser
+  aberto de novo (inclusive em jogos já abertos)
+
 * Sun Oct 25 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.2-1
 - Gravação: linha "medição da gravação" no log ao parar, com o FPS do jogo
   antes e durante, o custo da cópia na thread do jogo e a CPU do daemon
