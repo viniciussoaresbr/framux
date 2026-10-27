@@ -12,6 +12,9 @@ std::string config_dir();
 std::string runtime_dir();
 std::string socket_path();
 std::string stats_path();
+// Marca de "Parar o Framux": enquanto existir, a camada não desenha nem lê
+// atalhos (o modo automático continua carregando-a). O framuxd a apaga ao subir.
+std::string stopped_path();
 
 // Diretório de usuário XDG (PICTURES, VIDEOS…), lido de user-dirs.dirs.
 std::string xdg_user_dir(std::string_view name);

@@ -44,6 +44,11 @@ class SpinGuard {
   std::atomic_flag &f_;
 };
 
+bool stopped_by_user() {
+  const std::string p = stopped_path();
+  return !p.empty() && access(p.c_str(), F_OK) == 0;
+}
+
 void copy_str(char *dst, size_t n, const std::string &src) {
   std::strncpy(dst, src.c_str(), n - 1);
   dst[n - 1] = '\0';
@@ -120,6 +125,7 @@ bool Runtime::init(ipc::Api api) {
   if (wake_fd_ < 0) wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   stop_ = false;
   rejected_ = false;
+  stopped_.store(stopped_by_user(), std::memory_order_relaxed);
   enabled_ = true;
   thread_ = std::thread([this] { ipc_thread_main(); });
   ready_.store(true, std::memory_order_release);
@@ -208,6 +214,8 @@ void Runtime::on_present(uint32_t swapchain_id, uint32_t width, uint32_t height,
         FRAMUX_DEBUG("captura %llu descartada (comando com mais de 2 s)", (unsigned long long)c.request_id);
     }
   }
+
+  if (stopped_.load(std::memory_order_relaxed)) return;
 
   SwapState &s = swaps_[swapchain_id];
   if (s.frame_id == 0) s.fps.set_mode(cfg_.overlay.update);
@@ -507,6 +515,7 @@ int Runtime::connect_once() {
     connected_ = true;
     last_focus_ = -1;
   }
+  stopped_.store(false, std::memory_order_relaxed);
   timeval none{0, 0};
   setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &none, sizeof none);
   return s;
@@ -546,6 +555,7 @@ void Runtime::ipc_thread_main() {
     int sock = rejected_ ? -1 : connect_once();
     if (sock < 0) {
       // Daemon ausente: tenta de novo a cada segundo (§C.12 teste 10).
+      stopped_.store(stopped_by_user(), std::memory_order_relaxed);
       drop_outgoing();
       pollfd pfd{wake_fd_, POLLIN, 0};
       poll(&pfd, 1, rejected_ ? 60000 : 1000);

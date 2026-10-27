@@ -126,9 +126,17 @@ bool set_open_on_login(bool on, QString *err) {
                     err);
 }
 
-void start_daemon() { systemctl({"enable", "--now", "framuxd.socket"}); }
+void start_daemon() {
+  QFile::remove(QString::fromStdString(stopped_path()));
+  systemctl({"enable", "--now", "framuxd.socket"});
+}
 
-void stop_daemon() { systemctl({"stop", "framuxd.socket", "framuxd.service"}); }
+void stop_daemon() {
+  // Sem a marca, a camada carregada pelo modo automático seguiria
+  // desenhando o contador sozinha (modo sem daemon).
+  if (const std::string p = stopped_path(); !p.empty()) write_file(QString::fromStdString(p), {}, nullptr);
+  systemctl({"stop", "framuxd.socket", "framuxd.service"});
+}
 
 LayerInstall installed_layers() {
   QStringList dirs;

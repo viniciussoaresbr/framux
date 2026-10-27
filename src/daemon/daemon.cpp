@@ -142,6 +142,7 @@ bool Daemon::setup_socket(int listen_fd) {
     return false;
   }
   chmod(dir.c_str(), 0700);
+  unlink(stopped_path().c_str());
   socket_path_ = socket_path();
 
   if (listen_fd >= 0) {

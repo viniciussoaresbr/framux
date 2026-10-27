@@ -48,6 +48,11 @@ std::string stats_path() {
   return d.empty() ? d : d + "/stats";
 }
 
+std::string stopped_path() {
+  const std::string d = runtime_dir();
+  return d.empty() ? d : d + "/stopped";
+}
+
 std::string xdg_user_dir(std::string_view name) {
   const std::string key = "XDG_" + std::string(name) + "_DIR";
   std::string env = getenv_str(key.c_str());

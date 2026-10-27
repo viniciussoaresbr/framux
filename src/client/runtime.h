@@ -115,6 +115,8 @@ class Runtime {
 
   std::atomic<bool> enabled_{false};
   std::atomic<bool> ready_{false};  // init() concluído neste processo
+  // "Parar o Framux" (stopped_path()): sem overlay nem atalhos até o daemon voltar.
+  std::atomic<bool> stopped_{false};
   bool initialized_ = false;
   int init_pid_ = 0;
   ipc::Api api_ = ipc::Api::Unknown;
