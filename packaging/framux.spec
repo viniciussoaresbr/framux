@@ -4,7 +4,7 @@
 %bcond tests 0
 
 Name:           framux
-Version:        0.4.3
+Version:        0.4.4
 Release:        1%{?dist}
 Summary:        Contador de FPS, benchmark, screenshots e gravação para jogos no Linux
 License:        MIT
@@ -107,6 +107,13 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.framux.desk
 %{_datadir}/vulkan/implicit_layer.d/framux_*.json
 
 %changelog
+* Tue Oct 27 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.4-1
+- Gravação: com codificador no processador (SVT-AV1, x264, Ut Video), as
+  threads de conversão e codificação rodam com nice 10, para o jogo não
+  travar; o Ut Video usa só metade dos núcleos
+- Aba Gravações: a lista de codificadores mostra só os detectados e avisa,
+  em uma linha, quando o escolhido usa o processador
+
 * Mon Oct 26 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.3-1
 - "Parar o Framux" também apaga o contador nos jogos: com o modo automático
   a camada seguia desenhando sozinha; agora fica quieta até o Framux ser
