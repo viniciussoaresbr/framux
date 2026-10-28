@@ -18,6 +18,7 @@
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-Meson-00599c?style=flat-square&logo=cplusplus&logoColor=white">
   <img alt="Qt 6" src="https://img.shields.io/badge/GUI-Qt%206-41cd52?style=flat-square&logo=qt&logoColor=white">
   <img alt="Fedora 44" src="https://img.shields.io/badge/RPM-Fedora%2044-51a2da?style=flat-square&logo=fedora&logoColor=white">
+  <img alt="Versão 0.4.5" src="https://img.shields.io/badge/vers%C3%A3o-0.4.5-c6f432?style=flat-square">
   <img alt="Licença: MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-3a3a3a?style=flat-square">
   <img alt="Estado: alfa" src="https://img.shields.io/badge/estado-alfa-d69e2e?style=flat-square">
 </p>
@@ -99,13 +100,13 @@
 
 ## Instalação
 
-Os RPMs da última versão (Fedora 44) ficam em [`rpm/`](rpm/):
+Os RPMs da versão **0.4.5** (Fedora 44) ficam em [`rpm/`](rpm/):
 
-| Pacote                             | Conteúdo                                                |
-| ---------------------------------- | ------------------------------------------------------- |
-| `framux-<versão>.x86_64.rpm`       | janela, CLI, daemon, unidades systemd do usuário, ícone |
-| `framux-layer-<versão>.x86_64.rpm` | camada Vulkan e shim OpenGL para jogos 64 bits          |
-| `framux-layer-<versão>.i686.rpm`   | o mesmo para jogos 32 bits (ex.: Left 4 Dead 2 nativo)  |
+| Pacote                                 | Conteúdo                                                |
+| -------------------------------------- | ------------------------------------------------------- |
+| `framux-0.4.5-1.fc44.x86_64.rpm`       | janela, CLI, daemon, unidades systemd do usuário, ícone |
+| `framux-layer-0.4.5-1.fc44.x86_64.rpm` | camada Vulkan e shim OpenGL para jogos 64 bits          |
+| `framux-layer-0.4.5-1.fc44.i686.rpm`   | o mesmo para jogos 32 bits (ex.: Left 4 Dead 2 nativo)  |
 
 Instale os três juntos (as dependências, como `ffmpeg-free` e `pipewire`, vêm do repositório do Fedora):
 
