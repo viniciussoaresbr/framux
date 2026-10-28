@@ -10,6 +10,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -51,6 +52,13 @@ constexpr EncDef kDefs[] = {
     {"av1_sw", "libsvtav1", Kind::Svt},     {"x264", "libx264", Kind::X264},
     {"utvideo", "utvideo", Kind::Utvideo},
 };
+
+bool on_cpu(Kind k) { return k == Kind::Svt || k == Kind::X264 || k == Kind::Utvideo; }
+
+// Codificador no processador disputa os núcleos com o jogo. Com nice 10 a
+// thread perde a disputa: a gravação descarta quadros em vez de o jogo travar.
+// As threads criadas depois (do SVT-AV1, do Ut Video, do swscale) herdam.
+void yield_to_game() { setpriority(PRIO_PROCESS, gettid(), 10); }
 
 // Quadros já convertidos esperando o encoder (~270 ms a 60 fps): cobrem a
 // abertura do encoder e os picos do SVT-AV1 sem segurar os slots do jogo.
@@ -216,7 +224,8 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
       c->colorspace = AVCOL_SPC_RGB;
       c->color_range = AVCOL_RANGE_JPEG;
       c->color_trc = AVCOL_TRC_IEC61966_2_1;
-      c->thread_count = 0;  // um quadro por thread
+      // Um quadro por thread, em metade dos núcleos: com todos, o jogo travava.
+      c->thread_count = int(std::max<long>(sysconf(_SC_NPROCESSORS_ONLN) / 2, 1));
       av_opt_set(c->priv_data, "pred", "median", 0);
       break;
   }
@@ -402,6 +411,7 @@ struct Recorder::Impl {
   SwsContext *sws = nullptr;
   AVFrame *src = nullptr;  // embrulha o slot, sem cópia
   AVPixelFormat planned = AV_PIX_FMT_NONE;
+  bool planned_cpu = false;  // planned é de um encoder no processador
   int out_w = 0, out_h = 0;
   bool conv_started = false;
   bool gpu_yuv = false;  // a camada mandou NV12 (lido pelo encoder depois do 1º quadro)
@@ -452,7 +462,10 @@ struct Recorder::Impl {
     }
     for (const EncDef *d : order) {
       const AVCodec *codec = avcodec_find_encoder_by_name(d->ffname);
-      if (codec && (planned = sw_format_for(*d, codec)) != AV_PIX_FMT_NONE) break;
+      if (codec && (planned = sw_format_for(*d, codec)) != AV_PIX_FMT_NONE) {
+        planned_cpu = on_cpu(d->kind);
+        break;
+      }
     }
     if (planned == AV_PIX_FMT_NONE) planned = AV_PIX_FMT_YUV420P;
   }
@@ -556,6 +569,7 @@ struct Recorder::Impl {
 
   void conv_main() {
     pthread_setname_np(pthread_self(), "framux-rec");
+    if (planned_cpu) yield_to_game();
     for (;;) {
       VideoItem v;
       {
@@ -645,6 +659,7 @@ struct Recorder::Impl {
     const bool global = fmt->oformat->flags & AVFMT_GLOBALHEADER;
     std::string why, all_why;
     for (const EncDef *d : order) {
+      if (on_cpu(d->kind)) yield_to_game();
       if (open_encoder(*d, w, h, opt.fps, opt.quality, global, venc, &why)) break;
       FRAMUX_LOG("gravação: %s", why.c_str());
       all_why = why;
