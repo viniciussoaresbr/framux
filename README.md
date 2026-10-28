@@ -59,13 +59,11 @@
 </table>
 
 <br>
-
 <p align="center">
-  <img src="assets/images/framux-gif.gif" width="640" alt="Demonstração do overlay do Framux dentro do jogo, com o contador de FPS no canto da tela">
+  <img src="assets/images/framux-gif.gif" width="200" alt="Demonstração do overlay do Framux dentro do jogo, com o contador de FPS no canto da tela">
   <br>
   <sub>Demonstração do contador de FPS do Framux</sub>
 </p>
-
 <br>
 
 ## Destaques
