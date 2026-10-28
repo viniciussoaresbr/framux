@@ -33,6 +33,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "common/flatpak.h"
@@ -110,7 +111,7 @@ QString check(bool ok, const QString &text) {
 
 }  // namespace
 
-MainWindow::MainWindow(ConfigStore &store) : store_(store) {
+MainWindow::MainWindow(ConfigStore &store) : store_(store), audio_devices_(std::make_unique<AudioDevices>()) {
   setWindowTitle("Framux");
   setWindowIcon(app_icon());
 
@@ -150,7 +151,10 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store) {
   for (QWidget *page : {build_general(), build_fps(), build_recordings(), build_screenshots()})
     pages_->addWidget(scrollable(page));
   v->addWidget(pages_, 1);
-  tabs_->on_change = [this](int i) { pages_->setCurrentIndex(i); };
+  tabs_->on_change = [this](int i) {
+    pages_->setCurrentIndex(i);
+    update_meter();
+  };
 
   setCentralWidget(central);
   resize(800, 700);
@@ -555,6 +559,23 @@ QWidget *MainWindow::build_recordings() {
   v->addWidget(opts);
 
   QFrame *audio = card("Áudio", page, &b);
+  // Volume de 0 a 100 %, só na gravação (o do sistema não muda).
+  auto volume_row = [audio](QSlider **slider, const char *name) {
+    auto *w = new QWidget(audio);
+    auto *l = new QHBoxLayout(w);
+    l->setContentsMargins(0, 0, 0, 0);
+    *slider = new QSlider(Qt::Horizontal, w);
+    (*slider)->setObjectName(name);
+    (*slider)->setRange(0, 100);
+    (*slider)->setMaximumWidth(260);
+    auto *value = new QLabel(w);
+    value->setMinimumWidth(40);
+    connect(*slider, &QSlider::valueChanged, value, [value](int v) { value->setText(QString("%1 %").arg(v)); });
+    l->addWidget(*slider);
+    l->addWidget(value);
+    l->addStretch();
+    return w;
+  };
   audio_game_ = new QCheckBox("Gravar o som do jogo", audio);
   audio_game_->setObjectName("audioGame");
   b->addWidget(audio_game_);
@@ -562,6 +583,28 @@ QWidget *MainWindow::build_recordings() {
       hint("Só o áudio do processo do jogo, pelo PipeWire: músicas, chamadas e avisos de outros "
            "programas ficam de fora.",
            audio));
+  audio_mic_ = new QCheckBox("Gravar o microfone", audio);
+  audio_mic_->setObjectName("audioMic");
+  b->addWidget(audio_mic_);
+
+  audio_form_ = form();
+  audio_form_->addRow("Volume do jogo", volume_row(&audio_game_volume_, "audioGameVolume"));
+  audio_mic_device_ = new QComboBox(audio);
+  audio_mic_device_->setObjectName("audioMicDevice");
+  audio_mic_device_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  audio_form_->addRow("Microfone", audio_mic_device_);
+  audio_form_->addRow("Volume do microfone", volume_row(&audio_mic_volume_, "audioMicVolume"));
+  audio_mic_level_ = new LevelMeter(audio);
+  audio_mic_level_->setObjectName("audioMicLevel");
+  audio_mic_level_->setToolTip("Fale no microfone: a barra deve ficar no verde e só às vezes chegar ao amarelo");
+  audio_form_->addRow("Nível", audio_mic_level_);
+  b->addLayout(audio_form_);
+  audio_separate_ = new QCheckBox("Salvar também o jogo e o microfone em trilhas separadas", audio);
+  audio_separate_->setObjectName("audioSeparate");
+  audio_separate_->setToolTip(
+      "A primeira trilha, com tudo junto, é a que os players e sites tocam. As trilhas separadas "
+      "servem para ajustar a voz e o jogo num editor de vídeo.");
+  b->addWidget(audio_separate_);
   v->addWidget(audio);
 
   QFrame *rec = card("Recentes", page, &b);
@@ -611,9 +654,72 @@ QWidget *MainWindow::build_recordings() {
     recent_videos_->set_folder(expanded_folder(d));
   };
   connect(audio_game_, &QCheckBox::toggled, this, [this](bool on) {
+    update_audio_controls();
     if (!loading_) store_.edit([on](Config &c) { c.audio.game = on; });
   });
+  connect(audio_game_volume_, &QSlider::valueChanged, this, [this](int val) {
+    if (!loading_) store_.edit([val](Config &c) { c.audio.game_volume = val; });
+  });
+  connect(audio_mic_, &QCheckBox::toggled, this, [this](bool on) {
+    update_audio_controls();
+    update_meter();
+    if (!loading_) store_.edit([on](Config &c) { c.audio.microphone = on; });
+  });
+  connect(audio_mic_device_, &QComboBox::currentIndexChanged, this, [this] {
+    update_meter();
+    if (loading_) return;
+    const std::string d = audio_mic_device_->currentData().toString().toStdString();
+    store_.edit([d](Config &c) { c.audio.microphone_device = d; });
+  });
+  connect(audio_mic_volume_, &QSlider::valueChanged, this, [this](int val) {
+    if (!loading_) store_.edit([val](Config &c) { c.audio.microphone_volume = val; });
+  });
+  connect(audio_separate_, &QCheckBox::toggled, this, [this](bool on) {
+    if (!loading_) store_.edit([on](Config &c) { c.audio.separate_tracks = on; });
+  });
+  // O medidor mostra o que vai para a gravação: o pico já com o volume.
+  meter_timer_.setInterval(40);
+  connect(&meter_timer_, &QTimer::timeout, this,
+          [this] { audio_mic_level_->push(audio_devices_->take_peak() * float(audio_mic_volume_->value()) / 100.0f); });
   return page;
+}
+
+void MainWindow::fill_microphones() {
+  // Microfone do config que não está conectado continua na lista (e no
+  // config): a gravação usa a fonte padrão enquanto ele não volta.
+  const bool was_loading = loading_;
+  loading_ = true;
+  audio_devices_rev_ = audio_devices_->revision();
+  const QString want = QString::fromStdString(store_.get().audio.microphone_device);
+  std::vector<AudioDevices::Source> sources = audio_devices_->sources();
+  std::sort(sources.begin(), sources.end(), [](const auto &a, const auto &b) { return a.description < b.description; });
+  audio_mic_device_->clear();
+  audio_mic_device_->addItem("Padrão do sistema", QString("default"));
+  for (const auto &s : sources)
+    audio_mic_device_->addItem(QString::fromStdString(s.description), QString::fromStdString(s.name));
+  if (audio_mic_device_->findData(want) < 0) audio_mic_device_->addItem(QString("%1 (desconectado)").arg(want), want);
+  audio_mic_device_->setCurrentIndex(audio_mic_device_->findData(want));
+  loading_ = was_loading;
+}
+
+void MainWindow::update_audio_controls() {
+  const bool game = audio_game_->isChecked(), mic = audio_mic_->isChecked();
+  audio_form_->setRowVisible(audio_game_volume_->parentWidget(), game);
+  for (QWidget *w : {static_cast<QWidget *>(audio_mic_device_), audio_mic_volume_->parentWidget(),
+                     static_cast<QWidget *>(audio_mic_level_)})
+    audio_form_->setRowVisible(w, mic);
+  audio_separate_->setVisible(game && mic);
+}
+
+void MainWindow::update_meter() {
+  const bool on = audio_devices_->available() && audio_mic_->isChecked() && isVisible() && !isMinimized() &&
+                  pages_->currentIndex() == 2;
+  audio_devices_->monitor(on ? audio_mic_device_->currentData().toString().toStdString() : std::string());
+  if (on && !meter_timer_.isActive()) meter_timer_.start();
+  if (!on) {
+    meter_timer_.stop();
+    audio_mic_level_->push(0);
+  }
 }
 
 void MainWindow::fill_encoders() {
@@ -816,6 +922,12 @@ void MainWindow::load_from_config() {
   video_folder_->set_folder(c.video.folder);
   recent_videos_->set_folder(expanded_folder(c.video.folder));
   audio_game_->setChecked(c.audio.game);
+  audio_game_volume_->setValue(c.audio.game_volume);
+  audio_mic_->setChecked(c.audio.microphone);
+  fill_microphones();
+  audio_mic_volume_->setValue(c.audio.microphone_volume);
+  audio_separate_->setChecked(c.audio.separate_tracks);
+  update_audio_controls();
   update_encoder_hint();
 
   shot_key_->set_hotkey(c.hotkeys.screenshot);
@@ -854,6 +966,8 @@ QString MainWindow::check_hotkey(const std::string &h, const std::string Config:
 // Status do jogo ativo (D-Bus, sem acordar o daemon se ele estiver parado).
 
 void MainWindow::poll_status() {
+  if (audio_devices_->revision() != audio_devices_rev_) fill_microphones();
+  update_meter();  // a janela pode ter ido para a bandeja ou minimizado
   QDBusConnection bus = QDBusConnection::sessionBus();
   const bool up = bus.isConnected() && bus.interface()->isServiceRegistered(kBus);
   if (up != daemon_up_) {
@@ -1059,6 +1173,7 @@ void MainWindow::closeEvent(QCloseEvent *e) {
   store_.flush();
   if (tray_active()) {
     hide();
+    update_meter();  // solta o microfone
     e->ignore();
     if (!told_about_tray_) {
       told_about_tray_ = true;

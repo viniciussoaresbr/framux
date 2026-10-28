@@ -113,6 +113,23 @@ class ColorButton : public QPushButton {
   Rgb color_;
 };
 
+// Nível do microfone em dB (-60 a 0): verde, amarelo a partir de -12 dB e
+// vermelho perto de estourar. Sobe na hora e desce devagar, como o medidor
+// de uma mesa de som.
+class LevelMeter : public QWidget {
+ public:
+  explicit LevelMeter(QWidget *parent = nullptr);
+  // Pico (0..1) desde a última chamada; 0 com o medidor parado.
+  void push(float peak);
+  QSize sizeHint() const override { return {260, 10}; }
+
+ protected:
+  void paintEvent(QPaintEvent *) override;
+
+ private:
+  float level_ = 0;  // 0..1 na escala de dB
+};
+
 // Miniatura de uma tela com o contador desenhado pelo mesmo código do jogo.
 // Clicar num quadrante escolhe o canto.
 class CornerPreview : public QWidget {

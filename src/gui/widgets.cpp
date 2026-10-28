@@ -23,6 +23,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <cmath>
 #include <thread>
 
 #include "common/hotkey.h"
@@ -453,6 +455,41 @@ QWidget *hotkey_row(HotkeyButton *button, QWidget *parent) {
 
 // ---------------------------------------------------------------------------
 // ColorButton
+
+LevelMeter::LevelMeter(QWidget *parent) : QWidget(parent) {
+  setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  setMaximumWidth(260);
+}
+
+void LevelMeter::push(float peak) {
+  const float db = peak > 0 ? 20.0f * std::log10(peak) : -60.0f;
+  const float target = std::clamp((db + 60.0f) / 60.0f, 0.0f, 1.0f);
+  const float next = std::max(target, level_ - 0.04f);
+  if (next == level_) return;
+  level_ = next;
+  update();
+}
+
+void LevelMeter::paintEvent(QPaintEvent *) {
+  QPainter p(this);
+  p.setRenderHint(QPainter::Antialiasing);
+  const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+  p.setPen(Qt::NoPen);
+  p.setBrush(QColor(0x16, 0x17, 0x1a));
+  p.drawRoundedRect(r, 4, 4);
+  if (level_ <= 0) return;
+  const qreal w = r.width() * level_;
+  QLinearGradient g(r.topLeft(), r.topRight());
+  g.setColorAt(0, QColor(0x3e, 0xc4, 0x6d));
+  g.setColorAt(0.78, QColor(0x3e, 0xc4, 0x6d));  // -12 dB
+  g.setColorAt(0.8, QColor(0xe8, 0xc5, 0x2d));
+  g.setColorAt(0.95, QColor(0xe8, 0xc5, 0x2d));  // -3 dB
+  g.setColorAt(0.97, QColor(0xe5, 0x53, 0x4b));
+  QPainterPath clip;
+  clip.addRoundedRect(r, 4, 4);
+  p.setClipPath(clip);
+  p.fillRect(QRectF(r.left(), r.top(), w, r.height()), g);
+}
 
 ColorButton::ColorButton(QWidget *parent) : QPushButton(parent) {
   setMinimumWidth(130);

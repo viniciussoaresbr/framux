@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTest>
@@ -52,6 +53,7 @@ int main(int argc, char **argv) {
   qputenv("HOME", tmp.path().toUtf8());
   qputenv("XDG_CONFIG_HOME", (tmp.path() + "/cfg").toUtf8());
   qputenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent");
+  qputenv("PIPEWIRE_REMOTE", "framux-test-sem-pipewire");  // nem lista nem medidor no PipeWire do usuário
   qunsetenv("FRAMUX_CONFIG");
   qunsetenv("FRAMUX_AUTO");
   if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -113,6 +115,25 @@ int main(int argc, char **argv) {
   if (auto *audio = find<QCheckBox>(w, "audioGame")) audio->setChecked(false);
   if (auto *quality = find<QComboBox>(w, "videoQuality")) quality->setCurrentIndex(quality->findData("medium"));
 
+  // Microfone: sem PipeWire, só o padrão do sistema; volumes, trilhas
+  // separadas (só aparece com jogo e microfone).
+  auto *mic = find<QCheckBox>(w, "audioMic");
+  auto *separate = find<QCheckBox>(w, "audioSeparate");
+  auto *device = find<QComboBox>(w, "audioMicDevice");
+  if (!mic || !separate || !device) return 1;
+  CHECK(!mic->isChecked() && !device->isVisible());
+  mic->setChecked(true);
+  QApplication::processEvents();
+  CHECK(device->isVisible() && device->count() == 1 && device->currentData().toString() == "default");
+  CHECK(!separate->isVisible());  // o som do jogo foi desmarcado acima
+  if (auto *game = find<QCheckBox>(w, "audioGame")) game->setChecked(true);
+  QApplication::processEvents();
+  CHECK(separate->isVisible());
+  separate->setChecked(true);
+  if (auto *game = find<QCheckBox>(w, "audioGame")) game->setChecked(false);
+  if (auto *vol = find<QSlider>(w, "audioMicVolume")) vol->setValue(65);
+  if (auto *vol = find<QSlider>(w, "audioGameVolume")) vol->setValue(30);
+
   // Atalho repetido é recusado.
   w.select_tab(3);
   auto *shot = find<gui::HotkeyButton>(w, "shotKey");
@@ -141,6 +162,11 @@ int main(int argc, char **argv) {
   CHECK(c.video.container == "mp4");
   CHECK(c.video.quality == "medium");
   CHECK(!c.audio.game);
+  CHECK(c.audio.microphone);
+  CHECK(c.audio.microphone_device == "default");
+  CHECK(c.audio.microphone_volume == 65);
+  CHECK(c.audio.game_volume == 30);
+  CHECK(c.audio.separate_tracks);
 
   QFile env(tmp.path() + "/.config/environment.d/90-framux.conf");
   CHECK(env.open(QIODevice::ReadOnly) && env.readAll().contains("FRAMUX_AUTO=1"));

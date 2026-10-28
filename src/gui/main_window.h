@@ -8,6 +8,9 @@
 #include <QSystemTrayIcon>
 #include <QTimer>
 
+#include <memory>
+
+#include "gui/audio_devices.h"
 #include "gui/settings.h"
 #include "gui/widgets.h"
 
@@ -55,6 +58,12 @@ class MainWindow : public QMainWindow {
   void update_encoder_hint();
   // Itens do combo de encoder: só os que o daemon encontrou.
   void fill_encoders();
+  // Combo de microfones: padrão do sistema e as fontes do PipeWire.
+  void fill_microphones();
+  // Habilita volumes, microfone e trilhas conforme o que vai ser gravado.
+  void update_audio_controls();
+  // Liga o medidor só com a aba Gravações à vista e o microfone marcado.
+  void update_meter();
   // Opção de inicialização para jogos OpenGL (a do Flatpak, se integrado).
   QString launch_command() const;
 
@@ -117,6 +126,16 @@ class MainWindow : public QMainWindow {
   QCheckBox *video_mp4_ = nullptr;
   FolderRow *video_folder_ = nullptr;
   QCheckBox *audio_game_ = nullptr;
+  QSlider *audio_game_volume_ = nullptr;
+  QCheckBox *audio_mic_ = nullptr;
+  QComboBox *audio_mic_device_ = nullptr;
+  QSlider *audio_mic_volume_ = nullptr;
+  LevelMeter *audio_mic_level_ = nullptr;
+  QCheckBox *audio_separate_ = nullptr;
+  QFormLayout *audio_form_ = nullptr;
+  std::unique_ptr<AudioDevices> audio_devices_;
+  uint64_t audio_devices_rev_ = 0;
+  QTimer meter_timer_;
   RecentVideos *recent_videos_ = nullptr;
   QStringList encoders_;      // do StatusJson; vazio = daemon parado/desconhecido
   QString encoders_missing_;  // explicação do que falta (ex.: RPM Fusion)

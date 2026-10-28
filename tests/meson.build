@@ -69,7 +69,8 @@ endif
 recorder_test = executable('recorder_test', files('recorder_test.cpp'),
   include_directories : include_directories('../src'), dependencies : framux_video_dep)
 test('recorder', recorder_test, timeout : 120)
-audio_capture_test = executable('audio_capture_test', files('audio_capture_test.cpp'),
+# Inclui a lista de microfones da janela (só PipeWire, sem Qt).
+audio_capture_test = executable('audio_capture_test', files('audio_capture_test.cpp', '../src/gui/audio_devices.cpp'),
   include_directories : include_directories('../src'), dependencies : framux_video_dep)
 test('audio-capture', find_program('audio_test.sh'), args : audio_capture_test, is_parallel : false, timeout : 60)
 
