@@ -29,7 +29,6 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
-#include <QStandardItemModel>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -440,18 +439,19 @@ QWidget *MainWindow::build_fps() {
 namespace {
 
 // Valores de [video] encoder, na ordem do combo, e o nome do daemon para
-// cada um (StatusJson "encoders").
+// cada um (StatusJson "encoders"). cpu: disputa os núcleos com o jogo.
 struct EncoderChoice {
   const char *value;
   const char *label;
+  bool cpu;
 };
 constexpr EncoderChoice kEncoders[] = {
-    {"auto", "Automático"},
-    {"av1_hw", "AV1 (placa de vídeo)"},
-    {"av1_sw", "AV1 (processador, SVT-AV1)"},
-    {"h264_hw", "H.264 (placa de vídeo)"},
-    {"x264", "H.264 (processador, x264)"},
-    {"utvideo", "Ut Video sem perda (processador)"},
+    {"auto", "Automático", false},
+    {"av1_hw", "AV1 (placa de vídeo)", false},
+    {"av1_sw", "AV1 (processador, SVT-AV1)", true},
+    {"h264_hw", "H.264 (placa de vídeo)", false},
+    {"x264", "H.264 (processador, x264)", true},
+    {"utvideo", "Ut Video sem perda (processador)", true},
 };
 constexpr const char *kQualities[][2] = {{"low", "Baixa (arquivos menores)"},
                                          {"medium", "Média"},
@@ -518,10 +518,12 @@ QWidget *MainWindow::build_recordings() {
   el->setSpacing(4);
   video_encoder_ = new QComboBox(enc);
   video_encoder_->setObjectName("videoEncoder");
-  for (const auto &e : kEncoders) video_encoder_->addItem(e.label, QString(e.value));
   video_encoder_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
   video_encoder_hint_ = hint("", enc);
+  video_encoder_hint_->setObjectName("videoEncoderHint");
+  video_encoder_hint_->setWordWrap(false);  // uma linha, como a estimativa de tamanho
   video_encoder_hint_->hide();
+  fill_encoders();
   el->addWidget(video_encoder_, 0, Qt::AlignLeft);
   el->addWidget(video_encoder_hint_);
   f->addRow("Codificador", enc);
@@ -614,33 +616,39 @@ QWidget *MainWindow::build_recordings() {
   return page;
 }
 
+void MainWindow::fill_encoders() {
+  // Só "Automático" e o que o daemon encontrou; sem o daemon, todos. Um
+  // encoder do config que sumiu aparece como automático, sem regravar o
+  // config: a gravação cai no automático do mesmo jeito.
+  const bool was_loading = loading_;
+  loading_ = true;
+  video_encoder_->clear();
+  for (const auto &e : kEncoders)
+    if (encoders_.isEmpty() || e.value == QLatin1String("auto") || encoders_.contains(e.value))
+      video_encoder_->addItem(e.label, QString(e.value));
+  video_encoder_->setCurrentIndex(
+      std::max(0, video_encoder_->findData(QString::fromStdString(store_.get().video.encoder))));
+  loading_ = was_loading;
+}
+
 void MainWindow::update_encoder_hint() {
   const QString quality = video_quality_->currentData().toString();
   const bool lossless = quality == "lossless";
   video_encoder_->setEnabled(!lossless);
+  QString used = lossless ? "utvideo" : video_encoder_->currentData().toString();
   QString text;
-  QString used = video_encoder_->currentData().toString();
-  if (lossless) {
-    text = "Sem perda sempre usa Ut Video: arquivos enormes (5 GB ou mais por minuto em 1080p60) e sempre MKV.";
-  } else if (!encoders_.isEmpty()) {
-    // Itens que o daemon não encontrou ficam desabilitados com o motivo.
-    auto *model = qobject_cast<QStandardItemModel *>(video_encoder_->model());
-    for (int i = 0; i < video_encoder_->count(); ++i) {
-      const QString value = video_encoder_->itemData(i).toString();
-      const bool ok = value == "auto" || encoders_.contains(value);
-      if (model) model->item(i)->setEnabled(ok);
-    }
-    const QString cur = used;
-    if (cur == "auto") {
-      used = encoders_.first();
-      text = "Vai usar: " + video_encoder_->itemText(video_encoder_->findData(used)) + ".";
-    } else if (!encoders_.contains(cur)) {
-      used = encoders_.first();
-      text = "<span style='color:#e8912d'>Indisponível nesta máquina; a gravação usará o automático.</span>";
-    }
-    if (!encoders_missing_.isEmpty()) text += (text.isEmpty() ? "" : " ") + encoders_missing_.toHtmlEscaped();
+  if (used == "auto" && !encoders_.isEmpty()) {
+    used = encoders_.first();
+    text = "Vai usar: " + video_encoder_->itemText(video_encoder_->findData(used)) + ".";
   }
+  // Uma linha só: com quebra o formulário corta o texto. O detalhe vai na dica.
+  bool cpu = false;
+  for (const auto &e : kEncoders) cpu |= e.cpu && used == e.value;
+  if (cpu)
+    text = QString("<span style='color:#e8912d'>%1 no processador: pode derrubar o FPS do jogo.</span>")
+               .arg(lossless ? "Sem perda grava em Ut Video," : "Codifica");
   video_encoder_hint_->setText(text);
+  video_encoder_hint_->setToolTip(encoders_missing_);
   video_encoder_hint_->setVisible(!text.isEmpty());
 
   // Estimativa pela tela principal (o jogo costuma estar em tela cheia): o
@@ -802,7 +810,7 @@ void MainWindow::load_from_config() {
   video_fps_custom_->setValue(c.video.fps);
   video_fps_custom_->setEnabled(fps_id == 0);
   (c.video.scale == "half" ? video_half_ : video_full_)->setChecked(true);
-  video_encoder_->setCurrentIndex(std::max(0, video_encoder_->findData(QString::fromStdString(c.video.encoder))));
+  fill_encoders();
   video_quality_->setCurrentIndex(std::max(0, video_quality_->findData(QString::fromStdString(c.video.quality))));
   video_mp4_->setChecked(c.video.container == "mp4");
   video_folder_->set_folder(c.video.folder);
@@ -873,6 +881,7 @@ void MainWindow::apply_status(const QByteArray &json) {
   if (encoders != encoders_ || missing != encoders_missing_) {
     encoders_ = encoders;
     encoders_missing_ = missing;
+    fill_encoders();
     update_encoder_hint();
   }
   const QString backend = o.value("hotkey_backend").toString();

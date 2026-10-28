@@ -53,6 +53,8 @@ class MainWindow : public QMainWindow {
   void update_environment();
   // Encoder escolhido × encoders que o daemon encontrou nesta máquina.
   void update_encoder_hint();
+  // Itens do combo de encoder: só os que o daemon encontrou.
+  void fill_encoders();
   // Opção de inicialização para jogos OpenGL (a do Flatpak, se integrado).
   QString launch_command() const;
 
