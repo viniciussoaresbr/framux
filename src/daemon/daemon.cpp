@@ -1015,7 +1015,12 @@ ActionResult Daemon::video_start(Session &s) {
   opt.encoder = v.encoder;
   opt.quality = v.quality;
   opt.to_mp4 = v.container == "mp4";
-  opt.audio = s.cfg.audio.game;
+  const Config::Audio &a = s.cfg.audio;
+  opt.game_audio = a.game;
+  opt.mic_audio = a.microphone;
+  opt.separate_tracks = a.separate_tracks;
+  opt.game_volume = float(a.game_volume) / 100.0f;
+  opt.mic_volume = float(a.microphone_volume) / 100.0f;
   opt.available = encoders_.available;
   s.rec = std::make_shared<Recorder>(std::move(opt));
   s.rec_start_ns = now_ns();
@@ -1024,15 +1029,24 @@ ActionResult Daemon::video_start(Session &s) {
   s.presents.clear();
   s.rec_cpu_start_ns = process_cpu_ns();
   s.video_cost = {};
-  if (s.cfg.audio.game) {
-    std::weak_ptr<Recorder> weak = s.rec;
+  std::weak_ptr<Recorder> weak = s.rec;
+  if (a.game) {
     s.audio = GameAudio::start(
         s.hello.pid, s.peer_pid,
         [weak](const float *samples, uint32_t frames, uint64_t t) {
-          if (auto r = weak.lock()) r->push_audio(samples, frames, t);
+          if (auto r = weak.lock()) r->push_audio(AudioSource::Game, samples, frames, t);
         },
         &err);
-    if (!s.audio) FRAMUX_LOG("gravação sem áudio: %s", err.c_str());
+    if (!s.audio) FRAMUX_LOG("gravação sem áudio do jogo: %s", err.c_str());
+  }
+  if (a.microphone) {
+    s.mic = MicAudio::start(
+        a.microphone_device,
+        [weak](const float *samples, uint32_t frames, uint64_t t) {
+          if (auto r = weak.lock()) r->push_audio(AudioSource::Mic, samples, frames, t);
+        },
+        &err);
+    if (!s.mic) FRAMUX_LOG("gravação sem microfone: %s", err.c_str());
   }
   // A camada converte para NV12 (e reduz) na GPU, a não ser no sem perda,
   // que precisa do RGB. Camadas antigas ignoram e mandam RGB inteiro.
@@ -1079,6 +1093,7 @@ void Daemon::video_stop(Session &s, bool tell_layer) {
   if (!s.rec) return;
   if (tell_layer) ipc::send_msg(s.fd, ipc::MsgType::VideoStop, nullptr, 0, nullptr, 0, nullptr, 0, MSG_DONTWAIT);
   s.audio.reset();  // para de alimentar o Recorder antes de finalizar
+  s.mic.reset();
   drain(s);
   const std::string cost = recording_cost(s);
   std::shared_ptr<Recorder> rec = std::move(s.rec);
@@ -1162,6 +1177,10 @@ void Daemon::reload_config() {
     if (!s->hello_done) continue;
     const ipc::Corner old_default = s->cfg.overlay.corner;
     s->cfg = load_config(s->config_name, nullptr);
+    if (s->rec) {  // volumes mexidos na janela valem na gravação em andamento
+      s->rec->set_volume(AudioSource::Game, float(s->cfg.audio.game_volume) / 100.0f);
+      s->rec->set_volume(AudioSource::Mic, float(s->cfg.audio.microphone_volume) / 100.0f);
+    }
     if (s->cfg.overlay.corner != old_default) {
       s->corner = s->cfg.overlay.corner;
       send_overlay(*s);

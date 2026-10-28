@@ -25,6 +25,7 @@
 #include "core/bench_stats.h"
 #include "daemon/dbus_service.h"
 #include "daemon/game_audio.h"
+#include "daemon/mic_audio.h"
 #include "daemon/recorder.h"
 #include "daemon/worker.h"
 
@@ -83,6 +84,7 @@ struct Session {
   // Gravação (§B.7)
   std::shared_ptr<Recorder> rec;
   std::unique_ptr<GameAudio> audio;
+  std::unique_ptr<MicAudio> mic;
   std::shared_ptr<VideoMap> video_map;
   uint64_t rec_start_ns = 0;
   // Medição: presents do swapchain principal (últimos 10 s; durante a

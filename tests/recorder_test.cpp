@@ -1,9 +1,11 @@
 // Recorder (§B.7) sem jogo nem PipeWire: quadros e áudio sintéticos com
 // tempos conhecidos. Confere taxa constante (buraco vira repetição), trilha
-// Opus, duração, o remux para MP4 e as cores/orientação da conversão YUV.
+// Opus, duração, o remux para MP4, as cores/orientação da conversão YUV e a
+// mixagem do jogo com o microfone (volume, trilhas separadas).
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/samplefmt.h>
 }
 
 #include <fcntl.h>
@@ -73,7 +75,7 @@ RecorderResult record(const std::string &dir, const std::string &name, const std
   opt.encoder = encoder;
   opt.quality = "high";
   opt.to_mp4 = mp4;
-  opt.audio = true;
+  opt.game_audio = true;
   opt.available = probe_encoders().available;
   Recorder rec(opt);
 
@@ -101,9 +103,151 @@ RecorderResult record(const std::string &dir, const std::string &name, const std
       const float v = 0.5f * std::sin(2 * M_PI * 440 * (c * 480 + s) / 48000.0);
       chunk[size_t(s) * 2] = chunk[size_t(s) * 2 + 1] = v;
     }
-    rec.push_audio(chunk.data(), 480, t0 + uint64_t(c) * 10'000'000ull);
+    rec.push_audio(AudioSource::Game, chunk.data(), 480, t0 + uint64_t(c) * 10'000'000ull);
   }
   return rec.finish();
+}
+
+// Trilhas de áudio do arquivo: título, se é a padrão e o RMS do canal
+// esquerdo em janelas de meio segundo (decodificadas por inteiro).
+struct AudioTrack {
+  std::string title;
+  bool is_default = false;
+  std::vector<double> rms;
+};
+
+std::vector<AudioTrack> audio_tracks(const std::string &path) {
+  std::vector<AudioTrack> out;
+  AVFormatContext *f = nullptr;
+  if (avformat_open_input(&f, path.c_str(), nullptr, nullptr) < 0) return out;
+  avformat_find_stream_info(f, nullptr);
+  std::vector<AVCodecContext *> dec(f->nb_streams, nullptr);
+  std::vector<int> track(f->nb_streams, -1);
+  std::vector<std::vector<double>> sums;
+  std::vector<int64_t> pos;
+  for (unsigned i = 0; i < f->nb_streams; ++i) {
+    const AVStream *st = f->streams[i];
+    if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
+    dec[i] = avcodec_alloc_context3(codec);
+    avcodec_parameters_to_context(dec[i], st->codecpar);
+    avcodec_open2(dec[i], codec, nullptr);
+    const AVDictionaryEntry *t = av_dict_get(st->metadata, "title", nullptr, 0);
+    track[i] = int(out.size());
+    out.push_back({t ? t->value : "", (st->disposition & AV_DISPOSITION_DEFAULT) != 0, {}});
+    sums.emplace_back();
+    pos.push_back(0);
+  }
+  AVPacket *pkt = av_packet_alloc();
+  AVFrame *fr = av_frame_alloc();
+  auto drain = [&](unsigned si) {
+    while (avcodec_receive_frame(dec[si], fr) == 0) {
+      const int ti = track[si];
+      const bool planar = av_sample_fmt_is_planar(AVSampleFormat(fr->format));
+      const auto *d = reinterpret_cast<const float *>(fr->data[0]);
+      for (int n = 0; n < fr->nb_samples; ++n, ++pos[ti]) {
+        const double v = d[planar ? n : n * fr->ch_layout.nb_channels];
+        const size_t w = size_t(pos[ti] / 24000);
+        if (sums[ti].size() <= w) sums[ti].resize(w + 1, 0);
+        sums[ti][w] += v * v;
+      }
+    }
+  };
+  while (av_read_frame(f, pkt) >= 0) {
+    const unsigned si = unsigned(pkt->stream_index);
+    if (dec[si] && avcodec_send_packet(dec[si], pkt) >= 0) drain(si);
+    av_packet_unref(pkt);
+  }
+  for (unsigned si = 0; si < f->nb_streams; ++si)
+    if (dec[si]) {
+      avcodec_send_packet(dec[si], nullptr);
+      drain(si);
+      avcodec_free_context(&dec[si]);
+    }
+  for (size_t t = 0; t < out.size(); ++t)
+    for (double sum : sums[t]) out[t].rms.push_back(std::sqrt(sum / 24000));
+  av_frame_free(&fr);
+  av_packet_free(&pkt);
+  avformat_close_input(&f);
+  return out;
+}
+
+// Jogo (seno de 440 Hz, 2 s) e microfone (1 kHz a meio volume) até 1,5 s,
+// depois "desconectado" (para de chegar).
+std::vector<AudioTrack> record_mix(const std::string &dir, bool separate) {
+  const std::string path = dir + "/mix" + (separate ? "-sep" : "") + ".mkv";
+  RecorderOptions opt;
+  opt.fd = open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+  opt.path = path;
+  opt.fps = 30;
+  opt.encoder = "utvideo";
+  opt.game_audio = true;
+  opt.mic_audio = true;
+  opt.separate_tracks = separate;
+  opt.mic_volume = 0.5f;
+  Recorder rec(opt);
+
+  constexpr uint32_t W = 64, H = 64;
+  constexpr uint64_t t0 = 1'000'000'000'000ull, period = 1'000'000'000ull / 30;
+  std::vector<uint8_t> frame(size_t(W) * H * 4, 0x80);
+  std::atomic<int> released = 0;
+  for (int i = 0; i < 60; ++i) {
+    rec.push_video(frame.data(), W, H, W * 4, 44, false, false, t0 + uint64_t(i) * period, [&released] { ++released; });
+    while (released < i + 1) usleep(200);
+  }
+  std::vector<float> game(480 * 2), mic(480 * 2);
+  for (int c = 0; c < 200; ++c) {
+    for (int s = 0; s < 480; ++s) {
+      const double t = (c * 480 + s) / 48000.0;
+      game[size_t(s) * 2] = game[size_t(s) * 2 + 1] = float(0.5 * std::sin(2 * M_PI * 440 * t));
+      mic[size_t(s) * 2] = mic[size_t(s) * 2 + 1] = float(0.5 * std::sin(2 * M_PI * 1000 * t));
+    }
+    const uint64_t when = t0 + uint64_t(c) * 10'000'000ull;
+    rec.push_audio(AudioSource::Game, game.data(), 480, when);
+    if (c < 150) rec.push_audio(AudioSource::Mic, mic.data(), 480, when);
+  }
+  const RecorderResult r = rec.finish();
+  CHECK(r.ok);
+  return audio_tracks(r.path);
+}
+
+void check_mix(const std::string &dir) {
+  // Seno de amplitude A: RMS A/√2. Jogo 0,354; microfone a meio volume 0,177.
+  auto near = [](double v, double want) { return std::fabs(v - want) < 0.04; };
+  auto print = [](const AudioTrack &t) {
+    std::printf("  %s%s:", t.title.c_str(), t.is_default ? " (padrão)" : "");
+    for (double v : t.rms) std::printf(" %.3f", v);
+    std::printf("\n");
+  };
+
+  std::vector<AudioTrack> t = record_mix(dir, false);
+  std::printf("jogo + microfone:\n");
+  for (const auto &x : t) print(x);
+  CHECK(t.size() == 1);
+  if (t.size() == 1) {
+    CHECK(t[0].title == "Mix" && t[0].is_default);
+    CHECK(t[0].rms.size() >= 4);
+    if (t[0].rms.size() >= 4) {
+      CHECK(near(t[0].rms[0], std::hypot(0.354, 0.177)));  // os dois juntos
+      CHECK(near(t[0].rms[3], 0.354));                     // só o jogo
+    }
+  }
+
+  t = record_mix(dir, true);
+  std::printf("jogo + microfone, trilhas separadas:\n");
+  for (const auto &x : t) print(x);
+  CHECK(t.size() == 3);
+  if (t.size() == 3) {
+    CHECK(t[0].title == "Mix" && t[0].is_default);
+    CHECK(t[1].title == "Game" && !t[1].is_default);
+    CHECK(t[2].title == "Microphone" && !t[2].is_default);
+    for (const auto &x : t) CHECK(x.rms.size() >= 4);
+    if (t[1].rms.size() >= 4 && t[2].rms.size() >= 4) {
+      for (int w = 0; w < 4; ++w) CHECK(near(t[1].rms[w], 0.354));
+      for (int w = 0; w < 3; ++w) CHECK(near(t[2].rms[w], 0.177));
+      CHECK(t[2].rms[3] < 0.02);  // desconectado: silêncio, sem atrasar o jogo
+    }
+  }
 }
 
 // Y, U e V (ou G, B e R, se planar RGB) do pixel (x, y) do primeiro quadro.
@@ -289,6 +433,7 @@ int main() {
   check_colors(dir, false);
   check_colors(dir, true);
   check_nv12(dir);
+  check_mix(dir);
 
   // Sem nenhum quadro: erro e nenhum arquivo vazio na pasta.
   {

@@ -299,6 +299,7 @@ std::string remux_mp4(const std::string &mkv, std::string *err) {
     // "hvc1" é o que players da Apple e navegadores aceitam para HEVC.
     if (os->codecpar->codec_id == AV_CODEC_ID_HEVC) os->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
     os->time_base = in->streams[i]->time_base;
+    os->disposition = in->streams[i]->disposition;  // só a trilha mixada toca por padrão
     av_dict_copy(&os->metadata, in->streams[i]->metadata, 0);
   }
   if (r >= 0) {
@@ -382,6 +383,7 @@ struct Recorder::Impl {
   struct AudioItem {
     std::vector<float> samples;
     uint64_t time_ns;
+    AudioSource source;
   };
   struct FrameItem {  // convertido, com a posição na linha do tempo
     AVFrame *frame;
@@ -423,18 +425,33 @@ struct Recorder::Impl {
   uint8_t *avio_buf = nullptr;
   OpenEncoder venc;
   AVStream *vst = nullptr;
-  AVCodecContext *aenc = nullptr;
-  AVStream *ast = nullptr;
-  AVAudioFifo *fifo = nullptr;
   SwsContext *resws = nullptr;  // encoder de reserva com outro formato
   AVFrame *last = nullptr;      // último quadro enviado, para repetir em buracos
   AVPacket *pkt = nullptr;
   bool started = false;
   uint64_t start_ns = 0;
   int64_t last_index = -1;
-  int64_t audio_written = 0;  // amostras na linha do tempo (fifo + codificadas)
-  int64_t audio_pts = 0;
+  // Áudio: cada fonte fica alinhada na linha do tempo (amostras desde o
+  // primeiro quadro); o trecho que todas já cobrem é mixado nas trilhas.
+  struct AudioInput {
+    bool on = false;
+    AVAudioFifo *fifo = nullptr;  // amostras de `mixed` até `written`
+    int64_t written = 0;
+  };
+  struct AudioTrack {
+    unsigned sources = 0;  // bits de AudioSource
+    AVCodecContext *enc = nullptr;
+    AVStream *st = nullptr;
+    AVAudioFifo *fifo = nullptr;  // à espera de completar um pacote
+    int64_t pts = 0;
+  };
+  AudioInput inputs[2];
+  std::vector<AudioTrack> tracks;
+  int64_t mixed = 0;
   std::deque<AudioItem> early_audio;  // antes do primeiro quadro
+
+  // Qualquer thread.
+  std::atomic<float> volume[2] = {1.0f, 1.0f};
 
   void fail(const std::string &e) {
     {
@@ -621,32 +638,58 @@ struct Recorder::Impl {
     return write_packets(venc.ctx, vst);
   }
 
-  bool open_audio() {
+  bool open_audio_track(unsigned sources, const char *title) {
     const AVCodec *codec = avcodec_find_encoder_by_name("libopus");
     if (!codec) {
       FRAMUX_LOG("gravação sem áudio: libopus ausente no FFmpeg");
       return false;
     }
-    aenc = avcodec_alloc_context3(codec);
-    aenc->sample_rate = kAudioRate;
-    aenc->sample_fmt = AV_SAMPLE_FMT_FLT;
-    av_channel_layout_default(&aenc->ch_layout, 2);
-    aenc->bit_rate = 160000;
-    aenc->time_base = {1, kAudioRate};
-    if (fmt->oformat->flags & AVFMT_GLOBALHEADER) aenc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    int r = avcodec_open2(aenc, codec, nullptr);
+    AudioTrack t;
+    t.sources = sources;
+    t.enc = avcodec_alloc_context3(codec);
+    t.enc->sample_rate = kAudioRate;
+    t.enc->sample_fmt = AV_SAMPLE_FMT_FLT;
+    av_channel_layout_default(&t.enc->ch_layout, 2);
+    t.enc->bit_rate = 160000;
+    t.enc->time_base = {1, kAudioRate};
+    if (fmt->oformat->flags & AVFMT_GLOBALHEADER) t.enc->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    int r = avcodec_open2(t.enc, codec, nullptr);
     if (r < 0) {
       FRAMUX_LOG("gravação sem áudio: libopus: %s", av_err(r).c_str());
-      avcodec_free_context(&aenc);
+      avcodec_free_context(&t.enc);
       return false;
     }
-    ast = avformat_new_stream(fmt, nullptr);
-    avcodec_parameters_from_context(ast->codecpar, aenc);
-    ast->time_base = aenc->time_base;
-    av_dict_set(&ast->metadata, "title", "Game", 0);
-    av_dict_set(&ast->metadata, "handler_name", "Game", 0);
-    fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLT, 2, kAudioRate);
+    t.st = avformat_new_stream(fmt, nullptr);
+    avcodec_parameters_from_context(t.st->codecpar, t.enc);
+    t.st->time_base = t.enc->time_base;
+    // A primeira trilha é a que os players tocam.
+    t.st->disposition = tracks.empty() ? AV_DISPOSITION_DEFAULT : 0;
+    av_dict_set(&t.st->metadata, "title", title, 0);
+    av_dict_set(&t.st->metadata, "handler_name", title, 0);
+    t.fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLT, 2, kAudioRate);
+    tracks.push_back(t);
     return true;
+  }
+
+  // Jogo ou microfone: uma trilha. Os dois: a mixada primeiro e, se pedido,
+  // uma de cada para edição.
+  void open_audio() {
+    constexpr unsigned kGame = 1u << int(AudioSource::Game), kMic = 1u << int(AudioSource::Mic);
+    if (opt.game_audio && opt.mic_audio) {
+      if (open_audio_track(kGame | kMic, "Mix") && opt.separate_tracks) {
+        open_audio_track(kGame, "Game");
+        open_audio_track(kMic, "Microphone");
+      }
+    } else if (opt.game_audio) {
+      open_audio_track(kGame, "Game");
+    } else if (opt.mic_audio) {
+      open_audio_track(kMic, "Microphone");
+    }
+    if (tracks.empty()) return;
+    inputs[int(AudioSource::Game)].on = opt.game_audio;
+    inputs[int(AudioSource::Mic)].on = opt.mic_audio;
+    for (AudioInput &in : inputs)
+      if (in.on) in.fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLT, 2, kAudioRate);
   }
 
   // Primeiro quadro: abre encoder e arquivo no tamanho dele.
@@ -677,7 +720,7 @@ struct Recorder::Impl {
     avcodec_parameters_from_context(vst->codecpar, venc.ctx);
     vst->time_base = venc.ctx->time_base;
     vst->avg_frame_rate = venc.ctx->framerate;
-    if (opt.audio) open_audio();
+    open_audio();
 
     av_dict_set(&fmt->metadata, "title", opt.game.c_str(), 0);
     av_dict_set(&fmt->metadata, "encoder", "framux " FRAMUX_VERSION, 0);
@@ -697,7 +740,7 @@ struct Recorder::Impl {
     if (venc.ctx->rc_max_rate)
       std::snprintf(cap, sizeof cap, ", teto de %.1f Mbit/s", double(venc.ctx->rc_max_rate) / 1e6);
     FRAMUX_LOG("gravando %s: %dx%d a %d fps com %s%s, cor convertida %s%s", opt.path.c_str(), w, h, opt.fps,
-               venc.def->ffname, cap, gpu_yuv ? "na GPU" : "no daemon", aenc ? " + Opus" : "");
+               venc.def->ffname, cap, gpu_yuv ? "na GPU" : "no daemon", audio_desc().c_str());
     while (!early_audio.empty()) {
       process_audio(early_audio.front());
       early_audio.pop_front();
@@ -764,56 +807,107 @@ struct Recorder::Impl {
     last = frame;
   }
 
-  bool encode_audio_frames(bool flush) {
-    if (!aenc) return true;
-    const int fs = aenc->frame_size > 0 ? aenc->frame_size : 960;
-    while (av_audio_fifo_size(fifo) >= fs || (flush && av_audio_fifo_size(fifo) > 0)) {
+  std::string audio_desc() const {
+    if (tracks.empty()) return "";
+    std::string d = " + Opus (";
+    for (size_t i = 0; i < tracks.size(); ++i) {
+      if (i) d += ", ";
+      d += av_dict_get(tracks[i].st->metadata, "title", nullptr, 0)->value;
+    }
+    return d + ")";
+  }
+
+  bool encode_track(AudioTrack &t, bool flush) {
+    const int fs = t.enc->frame_size > 0 ? t.enc->frame_size : 960;
+    while (av_audio_fifo_size(t.fifo) >= fs || (flush && av_audio_fifo_size(t.fifo) > 0)) {
       AVFrame *f = av_frame_alloc();
       f->nb_samples = fs;
       f->format = AV_SAMPLE_FMT_FLT;
-      av_channel_layout_copy(&f->ch_layout, &aenc->ch_layout);
+      av_channel_layout_copy(&f->ch_layout, &t.enc->ch_layout);
       f->sample_rate = kAudioRate;
       av_frame_get_buffer(f, 0);
-      const int n = av_audio_fifo_read(fifo, reinterpret_cast<void **>(f->data), fs);
+      const int n = av_audio_fifo_read(t.fifo, reinterpret_cast<void **>(f->data), fs);
       if (n < fs)  // fim da gravação: completa o último pacote com silêncio
         std::memset(f->data[0] + size_t(n) * 2 * sizeof(float), 0, size_t(fs - n) * 2 * sizeof(float));
-      f->pts = audio_pts;
-      audio_pts += fs;
-      const int r = avcodec_send_frame(aenc, f);
+      f->pts = t.pts;
+      t.pts += fs;
+      const int r = avcodec_send_frame(t.enc, f);
       av_frame_free(&f);
-      if (r < 0 || !write_packets(aenc, ast)) return false;
+      if (r < 0 || !write_packets(t.enc, t.st)) return false;
     }
     return true;
   }
 
+  void write_input(AudioInput &in, float *samples, int64_t frames) {
+    void *planes[1] = {samples};
+    av_audio_fifo_write(in.fifo, planes, int(frames));
+    in.written += frames;
+  }
+
+  void pad_input(AudioInput &in, int64_t frames) {
+    std::vector<float> zeros(size_t(frames) * 2, 0.0f);
+    write_input(in, zeros.data(), frames);
+  }
+
+  // Mixa o trecho que todas as fontes já cobrem e codifica nas trilhas.
+  void mix_audio(bool flush) {
+    int64_t upto = INT64_MAX;
+    for (const AudioInput &in : inputs)
+      if (in.on) upto = std::min(upto, in.written);
+    if (upto != INT64_MAX && upto > mixed) {
+      const int64_t n = upto - mixed;
+      std::vector<float> src[2], out(size_t(n) * 2);
+      for (int i = 0; i < 2; ++i) {
+        if (!inputs[i].on) continue;
+        src[i].resize(out.size());
+        void *planes[1] = {src[i].data()};
+        av_audio_fifo_read(inputs[i].fifo, planes, int(n));
+      }
+      for (AudioTrack &t : tracks) {
+        std::fill(out.begin(), out.end(), 0.0f);
+        for (int i = 0; i < 2; ++i)
+          if (t.sources & (1u << i))
+            for (size_t k = 0; k < out.size(); ++k) out[k] += src[i][k];
+        if (t.sources & (t.sources - 1))  // mais de uma fonte: sem estourar
+          for (float &v : out) v = std::clamp(v, -1.0f, 1.0f);
+        void *planes[1] = {out.data()};
+        av_audio_fifo_write(t.fifo, planes, int(n));
+      }
+      mixed = upto;
+    }
+    for (AudioTrack &t : tracks)
+      if (!encode_track(t, flush)) return;
+  }
+
   void process_audio(AudioItem &a) {
     if (!started) {
-      // Áudio antes do primeiro quadro: guarda até 2 s.
+      // Áudio antes do primeiro quadro: guarda até 2 s de cada fonte.
       early_audio.push_back(std::move(a));
-      while (early_audio.size() > 200) early_audio.pop_front();
+      while (early_audio.size() > 400) early_audio.pop_front();
       return;
     }
-    if (!aenc) return;
+    AudioInput &in = inputs[int(a.source)];
+    if (!in.on) return;
     const int64_t frames = int64_t(a.samples.size() / 2);
     const int64_t at = std::llround((double(a.time_ns) - double(start_ns)) * kAudioRate / 1e9);
     int64_t skip = 0;
-    if (at > audio_written + kAudioRate / 50) {
-      // Buraco (jogo calado e o grafo parou de nos chamar): silêncio, até 10 s.
-      const int64_t gap = std::min<int64_t>(at - audio_written, int64_t(kAudioRate) * 10);
-      std::vector<float> zeros(size_t(gap) * 2, 0.0f);
-      void *planes[1] = {zeros.data()};
-      av_audio_fifo_write(fifo, planes, int(gap));
-      audio_written += gap;
-    } else if (at < audio_written - kAudioRate / 10) {
+    if (at > in.written + kAudioRate / 50) {
+      // Buraco (fonte calada e o grafo parou de nos chamar): silêncio, até 10 s.
+      pad_input(in, std::min<int64_t>(at - in.written, int64_t(kAudioRate) * 10));
+    } else if (at < in.written - kAudioRate / 10) {
       // Sobreposição grande (antes do início ou relógio voltou): corta.
-      skip = std::min(frames, audio_written - at);
+      skip = std::min(frames, in.written - at);
     }
-    if (skip < frames) {
-      void *planes[1] = {a.samples.data() + skip * 2};
-      av_audio_fifo_write(fifo, planes, int(frames - skip));
-      audio_written += frames - skip;
-    }
-    encode_audio_frames(false);
+    if (skip < frames) write_input(in, a.samples.data() + skip * 2, frames - skip);
+    // Fonte atrasada (jogo calado, microfone desconectado): silêncio até
+    // meio segundo atrás da mais adiantada, para a mixagem não esperar.
+    constexpr int64_t kMaxLag = kAudioRate / 2;
+    int64_t ahead = 0;
+    for (const AudioInput &i : inputs)
+      if (i.on) ahead = std::max(ahead, i.written);
+    for (AudioInput &i : inputs)
+      if (i.on && i.written < ahead - kMaxLag) pad_input(i, ahead - kMaxLag - i.written);
+    mix_audio(false);
   }
 
   void finalize() {
@@ -821,10 +915,18 @@ struct Recorder::Impl {
       if (!failed) fail("nenhum quadro do jogo chegou");
     } else {
       encode_video(nullptr);
-      if (aenc) {
-        encode_audio_frames(true);
-        avcodec_send_frame(aenc, nullptr);
-        write_packets(aenc, ast);
+      if (!tracks.empty()) {
+        // As fontes terminam juntas: a que parou antes completa com silêncio.
+        int64_t end = 0;
+        for (const AudioInput &in : inputs)
+          if (in.on) end = std::max(end, in.written);
+        for (AudioInput &in : inputs)
+          if (in.on && in.written < end) pad_input(in, end - in.written);
+        mix_audio(true);
+        for (AudioTrack &t : tracks) {
+          avcodec_send_frame(t.enc, nullptr);
+          write_packets(t.enc, t.st);
+        }
       }
       const int r = av_write_trailer(fmt);
       if (r < 0) fail("falha ao finalizar o arquivo: " + av_err(r));
@@ -833,9 +935,15 @@ struct Recorder::Impl {
     av_frame_free(&last);
     av_packet_free(&pkt);
     sws_free_context(&resws);
-    if (fifo) av_audio_fifo_free(fifo);
-    fifo = nullptr;
-    avcodec_free_context(&aenc);
+    for (AudioTrack &t : tracks) {
+      av_audio_fifo_free(t.fifo);
+      avcodec_free_context(&t.enc);
+    }
+    tracks.clear();
+    for (AudioInput &in : inputs) {
+      if (in.fifo) av_audio_fifo_free(in.fifo);
+      in.fifo = nullptr;
+    }
     venc.reset();
     if (fmt) {
       if (fmt->pb) {
@@ -878,6 +986,8 @@ struct Recorder::Impl {
 
 Recorder::Recorder(RecorderOptions opt) : impl_(std::make_unique<Impl>()) {
   impl_->opt = std::move(opt);
+  impl_->volume[int(AudioSource::Game)] = impl_->opt.game_volume;
+  impl_->volume[int(AudioSource::Mic)] = impl_->opt.mic_volume;
   impl_->fd = impl_->opt.fd;
   impl_->plan();
   impl_->enc_thread = std::thread([this] { impl_->enc_main(); });
@@ -900,12 +1010,19 @@ void Recorder::push_video(const uint8_t *data, uint32_t width, uint32_t height, 
   impl_->conv_cv.notify_one();
 }
 
-void Recorder::push_audio(const float *samples, uint32_t frames, uint64_t time_ns) {
+void Recorder::push_audio(AudioSource src, const float *samples, uint32_t frames, uint64_t time_ns) {
+  // O volume vale a partir de agora, não de quando o bloco for codificado.
+  std::vector<float> v(samples, samples + size_t(frames) * 2);
+  const float gain = impl_->volume[int(src)];
+  if (gain != 1.0f)
+    for (float &x : v) x *= gain;
   std::lock_guard lk(impl_->mu);
   if (impl_->stopping) return;
-  impl_->encq.push_back(Impl::AudioItem{std::vector<float>(samples, samples + size_t(frames) * 2), time_ns});
+  impl_->encq.push_back(Impl::AudioItem{std::move(v), time_ns, src});
   impl_->enc_cv.notify_one();
 }
+
+void Recorder::set_volume(AudioSource src, float volume) { impl_->volume[int(src)] = std::clamp(volume, 0.0f, 1.0f); }
 
 void Recorder::add_layer_drops(uint32_t n) { impl_->layer_drops += n; }
 

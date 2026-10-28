@@ -48,6 +48,11 @@ container          = "mkv"         # mkv | mp4 (grava em MKV e converte ao parar
 
 [audio]
 game               = true          # som do processo do jogo (PipeWire), trilha "Game"
+game_volume        = 100           # 0..100 %, só na gravação
+microphone         = false         # microfone, trilha "Microphone"
+microphone_device  = "default"     # node.name da fonte no PipeWire (pw-cli ls Node) ou "default"
+microphone_volume  = 100           # 0..100 %
+separate_tracks    = false         # jogo + microfone: a trilha mixada e mais uma de cada
 
 [stats_export]
 enabled            = true          # $XDG_RUNTIME_DIR/framux/stats + sinal D-Bus StatsChanged

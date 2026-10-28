@@ -1,6 +1,7 @@
 // Gravação de vídeo (§B.7): converte os quadros vindos do jogo, codifica com
 // FFmpeg (encoder de hardware quando houver) e escreve um MKV com trilha de
-// vídeo e, opcionalmente, o áudio do jogo em Opus. Tudo numa thread própria:
+// vídeo e, opcionalmente, o áudio do jogo e do microfone em Opus (mixados
+// numa trilha e, se pedido, também separados). Tudo numa thread própria:
 // o loop do daemon só enfileira.
 #pragma once
 
@@ -23,16 +24,25 @@ struct EncoderProbe {
 // o daemon roda isso num processo filho (`framuxd --probe-encoders`).
 EncoderProbe probe_encoders();
 
+enum class AudioSource { Game = 0, Mic = 1 };
+
 struct RecorderOptions {
   int fd = -1;       // arquivo .mkv já criado (o Recorder assume o fd)
   std::string path;  // caminho dele, para remux e mensagens
   std::string game;  // tag title
   int fps = 60;
   bool half = false;
-  std::string encoder;                 // chave de [video] encoder ("auto" = primeiro de `available`)
-  std::string quality;                 // low | medium | high | lossless
-  bool to_mp4 = false;                 // remux para MP4 ao terminar
-  bool audio = false;                  // cria a trilha "Game" (Opus 48 kHz estéreo)
+  std::string encoder;  // chave de [video] encoder ("auto" = primeiro de `available`)
+  std::string quality;  // low | medium | high | lossless
+  bool to_mp4 = false;  // remux para MP4 ao terminar
+  // Fontes de áudio (Opus 48 kHz estéreo). Só uma: trilha "Game" ou
+  // "Microphone". As duas: trilha "Mix" e, com separate_tracks, também uma
+  // de cada.
+  bool game_audio = false;
+  bool mic_audio = false;
+  bool separate_tracks = false;
+  float game_volume = 1.0f;  // 0..1
+  float mic_volume = 1.0f;
   std::vector<std::string> available;  // de probe_encoders(); vazio = tentar todos
 };
 
@@ -64,7 +74,10 @@ class Recorder {
 
   // Amostras float intercaladas, 2 canais, 48 kHz; `time_ns` é o
   // CLOCK_MONOTONIC da primeira amostra. Pode ser chamado de qualquer thread.
-  void push_audio(const float *samples, uint32_t frames, uint64_t time_ns);
+  void push_audio(AudioSource src, const float *samples, uint32_t frames, uint64_t time_ns);
+
+  // Volume (0..1), valendo para o áudio que chegar daqui em diante.
+  void set_volume(AudioSource src, float volume);
 
   // Descartes informados pela camada (sem slot livre).
   void add_layer_drops(uint32_t n);

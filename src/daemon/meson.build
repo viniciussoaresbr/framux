@@ -8,7 +8,7 @@ foreach name : ['libavcodec', 'libavformat', 'libavutil', 'libswscale', 'libpipe
 endforeach
 
 # Gravação e áudio numa biblioteca à parte: também usada pelos testes.
-framux_video = static_library('framux_video', files('game_audio.cpp', 'recorder.cpp'),
+framux_video = static_library('framux_video', files('game_audio.cpp', 'mic_audio.cpp', 'recorder.cpp'),
   dependencies : [framux_core_dep, thread_dep, video_deps])
 framux_video_dep = declare_dependency(link_with : framux_video, dependencies : [framux_core_dep, video_deps])
 

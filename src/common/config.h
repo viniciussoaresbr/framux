@@ -91,11 +91,14 @@ struct Config {
 
   struct Audio {
     bool game = true;
+    int game_volume = 100;  // % (0..100), só na gravação
     bool system = false;
     bool microphone = false;
-    std::string microphone_device = "default";
+    std::string microphone_device = "default";  // node.name no PipeWire ou "default"
+    int microphone_volume = 100;
     bool push_to_talk = false;
-    bool mix = false;
+    // Com jogo e microfone: além da trilha mixada, uma trilha de cada.
+    bool separate_tracks = false;
     std::string channels = "stereo";
     std::string codec = "opus";
   } audio;
