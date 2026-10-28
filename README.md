@@ -85,7 +85,7 @@
     <td width="50%" valign="top">
       <img src="assets/images/framux-gravacoes.png" alt="Aba Gravações, com codificador, qualidade, estimativa de taxa e gravações recentes" width="100%">
       <h3>Gravação moderna</h3>
-      AV1 ou H.264 pela placa de vídeo, SVT-AV1 ou x264 pelo processador, ou Ut Video sem perda. MKV que sobrevive a travamentos, MP4 por remux e o áudio <i>só</i> do jogo, via PipeWire.
+      AV1 ou H.264 pela placa de vídeo, SVT-AV1 ou x264 pelo processador, ou Ut Video sem perda. MKV que sobrevive a travamentos, MP4 por remux, o áudio <i>só</i> do jogo e o microfone, via PipeWire.
     </td>
     <td width="50%" valign="top">
       <img src="assets/images/framux-capturas.png" alt="Aba Capturas, com formato, qualidade, série automática e miniaturas" width="100%">
@@ -143,12 +143,12 @@ Tudo pode ser trocado na janela: clique no botão do atalho e pressione a tecla 
 
 ### A janela
 
-| Aba       | O que tem                                                                                                                                                                                                        |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Geral     | modo automático, abrir ao entrar na sessão, iniciar minimizado, bandeja; à direita, o estado do ambiente e "Parar o Framux"                                                                                      |
-| FPS       | prévia clicável do canto do overlay, atalhos, cor do contador, frame time, modo de atualização; benchmark: atalho, duração, arquivos, pasta                                                                      |
-| Gravações | atalho, FPS do vídeo (30/60/outro), tamanho cheio ou metade, codificador (só os detectados nesta máquina; aviso quando usa o processador), qualidade, converter para MP4, pasta, som do jogo, gravações recentes |
-| Capturas  | atalho, formato (PNG/JPG/BMP/TGA) e qualidade, incluir contador, série a cada N s, pasta e miniaturas                                                                                                            |
+| Aba       | O que tem                                                                                                                                                                                                                                                                   |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Geral     | modo automático, abrir ao entrar na sessão, iniciar minimizado, bandeja; à direita, o estado do ambiente e "Parar o Framux"                                                                                                                                                 |
+| FPS       | prévia clicável do canto do overlay, atalhos, cor do contador, modo de atualização; benchmark: atalho, duração, arquivos, pasta                                                                                                                                             |
+| Gravações | atalho, FPS do vídeo (30/60/outro), tamanho cheio ou metade, codificador (só os detectados nesta máquina; aviso quando usa o processador), qualidade, converter para MP4, pasta, som do jogo e microfone (volumes, medidor de nível, trilhas separadas), gravações recentes |
+| Capturas  | atalho, formato (PNG/JPG/BMP/TGA) e qualidade, incluir contador, série a cada N s, pasta e miniaturas                                                                                                                                                                       |
 
 As alterações vão para o `config.toml` na hora e chegam aos jogos já abertos. Fechar a janela não para o monitoramento: com bandeja, o Framux fica no ícone (no GNOME, a bandeja exige a extensão AppIndicator).
 
@@ -180,7 +180,7 @@ framux config default                 # config padrão comentável
 
 ## Gravação
 
-Gravações em `$XDG_VIDEOS_DIR/framux/<jogo> AAAA-MM-DD HH-MM-SS-cc.mkv` (ou `.mp4` com _Converter para MP4_): vídeo em taxa constante e a trilha "Game" em Opus 48 kHz estéreo. O MKV é escrito durante a gravação, então sobrevive se o jogo travar; o MP4 é um remux dele ao parar, sem recodificar (Ut Video fica em MKV). Uma notificação mostra o arquivo, a duração e o tamanho.
+Gravações em `$XDG_VIDEOS_DIR/framux/<jogo> AAAA-MM-DD HH-MM-SS-cc.mkv` (ou `.mp4` com _Converter para MP4_): vídeo em taxa constante e o áudio em Opus 48 kHz estéreo. O MKV é escrito durante a gravação, então sobrevive se o jogo travar; o MP4 é um remux dele ao parar, sem recodificar (Ut Video fica em MKV). Uma notificação mostra o arquivo, a duração e o tamanho.
 
 | Codificador            | Encoders do FFmpeg                                                                      | Observação                                                                                                                                     |
 | ---------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -205,6 +205,17 @@ O `ffmpeg-free` (usado por VLC, Totem e afins) decodifica H.264 só pelo openh26
 </details>
 
 **Áudio só do jogo.** O som vem apenas do processo do jogo (`application.process.id` no PipeWire, inclusive Wine/Proton e o Steam Flatpak): música, chamadas e avisos de outros programas ficam de fora.
+
+**Microfone.** Em _Áudio_, na aba Gravações, _Gravar o microfone_ grava a fonte escolhida na lista (ou a padrão do sistema), com volume próprio de 0 a 100 % para o jogo e para o microfone. O volume vale só na gravação, sem mexer no do sistema, e mudanças durante a gravação valem na hora. O medidor de nível mostra o microfone enquanto a aba está aberta. As trilhas ficam assim:
+
+| Gravando          | Trilhas                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| só o jogo         | "Game"                                                                              |
+| só o microfone    | "Microphone"                                                                        |
+| jogo e microfone  | "Mix", com os dois juntos (é a que players, navegadores e o Discord tocam)          |
+| … com _separadas_ | "Mix" e mais "Game" e "Microphone", para ajustar a voz e o jogo num editor de vídeo |
+
+Se o microfone escolhido for desconectado, a gravação continua com o padrão do sistema.
 
 **Medindo o custo.** Ao parar, o log do daemon (`journalctl --user -u framuxd`) traz uma linha `medição da gravação`: FPS do jogo (média e 1 % low) nos 10 s antes e durante a gravação, quanto a cópia de cada quadro levou na thread do jogo e quantos núcleos o `framuxd` usou. Junto com a linha `gravação salva` (quadros repetidos e descartados), diz se a gravação está pesando no jogo.
 
@@ -265,19 +276,19 @@ Feche e abra o Steam depois de mudar. As cópias são renovadas quando a janela 
 ## Estado do projeto
 
 > [!IMPORTANT]
-> O Framux está em **alfa**. Contador, benchmark, screenshots, gravação com o áudio do jogo e a janela de configuração funcionam; loop recording, microfone e áudio do sistema ainda não. Encontrou um problema? Abra uma [issue](https://github.com/viniciussoaresbr/framux/issues) com a saída de `framux doctor`, o jogo, a API (Vulkan/OpenGL/Proton) e sua GPU.
+> O Framux está em **alfa**. Contador, benchmark, screenshots, gravação com o áudio do jogo e o microfone e a janela de configuração funcionam; loop recording, push-to-talk e áudio do sistema ainda não. Encontrou um problema? Abra uma [issue](https://github.com/viniciussoaresbr/framux/issues) com a saída de `framux doctor`, o jogo, a API (Vulkan/OpenGL/Proton) e sua GPU.
 
-| Marco | Conteúdo                                                                                                       | Estado                                                      |
-| ----- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| M0    | Meson, testes, CI (container Fedora, lavapipe/llvmpipe), clang-format                                          | ✅                                                          |
-| M1    | Camada Vulkan: timestamps, overlay de segmentos, config local, `framux run`                                    | ✅                                                          |
-| M2    | Daemon, IPC + ring, benchmark, hotkeys X11 e in-game, CLI                                                      | ✅                                                          |
-| M3    | Shim OpenGL (GLX/EGL, `dlsym`), build i686                                                                     | ✅                                                          |
-| M4    | Screenshots (staging Vulkan / PBO GL, conversões, PNG/JPEG/BMP/TGA, repetição)                                 | ✅                                                          |
-| M5    | Vídeo (NVENC, VA-API, SVT-AV1, Ut Video), MKV/MP4, metade do tamanho, taxa constante, áudio do jogo (PipeWire) | ✅ falta microfone, push-to-talk, áudio do sistema          |
-| M6    | Loop recording, zero-copy DMA-BUF, lock fps                                                                    | ⏳ próxima etapa                                            |
-| M7    | GUI Qt 6: abas, bandeja, modo automático                                                                       | ✅ falta visualizador de benchmarks, portal GlobalShortcuts |
-| M8    | COPR/Flatpak, documentação de usuário                                                                          | 🟡 parcial (RPM pronto)                                     |
+| Marco | Conteúdo                                                                                                                   | Estado                                                      |
+| ----- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| M0    | Meson, testes, CI (container Fedora, lavapipe/llvmpipe), clang-format                                                      | ✅                                                          |
+| M1    | Camada Vulkan: timestamps, overlay de segmentos, config local, `framux run`                                                | ✅                                                          |
+| M2    | Daemon, IPC + ring, benchmark, hotkeys X11 e in-game, CLI                                                                  | ✅                                                          |
+| M3    | Shim OpenGL (GLX/EGL, `dlsym`), build i686                                                                                 | ✅                                                          |
+| M4    | Screenshots (staging Vulkan / PBO GL, conversões, PNG/JPEG/BMP/TGA, repetição)                                             | ✅                                                          |
+| M5    | Vídeo (NVENC, VA-API, SVT-AV1, Ut Video), MKV/MP4, metade do tamanho, taxa constante, áudio do jogo e microfone (PipeWire) | ✅ falta push-to-talk, áudio do sistema                     |
+| M6    | Loop recording, zero-copy DMA-BUF, lock fps                                                                                | ⏳ próxima etapa                                            |
+| M7    | GUI Qt 6: abas, bandeja, modo automático                                                                                   | ✅ falta visualizador de benchmarks, portal GlobalShortcuts |
+| M8    | COPR/Flatpak, documentação de usuário                                                                                      | 🟡 parcial (RPM pronto)                                     |
 
 O loop recording (`framux loop`, `[hotkeys] loop_save`) ainda responde "indisponível" (o overlay mostra `-`).
 
@@ -331,8 +342,8 @@ Sem `qt6-qtbase-devel` a GUI é pulada (`-Dgui=enabled` a torna obrigatória).
 - **gl-state** — overlay num contexto GL core com estado "sujo": estado e `glGetError` do jogo intactos, overlay presente na janela;
 - **layer-validation** — app Vulkan com a camada e a validation layer Khronos;
 - **e2e-\*** — daemon + camada/shim + CLI reais num Xvfb com D-Bus isolado: Vulkan e GL (benchmark e screenshots com/sem overlay), jogo morto no meio do benchmark, daemon caindo/voltando, hotkeys in-game via XTest, modo automático (app comum intocado, jogo da Steam vira sessão), mudança no `config.toml` chegando ao jogo aberto e gravação (Vulkan com MP4 e cor convertida na GPU sob a camada de validação, inteiro e na metade, cores conferidas pixel a pixel; GL em Ut Video na metade do tamanho, jogo morto no meio, F9);
-- **recorder** — gravador com quadros e áudio sintéticos: buraco de quadros vira repetição, trilha Opus, duração, remux para MP4, nada de arquivo vazio, cores BT.709 e orientação, NV12 vindo da GPU, pixels exatos no sem perda;
-- **audio-capture** — PipeWire + WirePlumber privados: um seno tocado pelo próprio processo é achado pelo PID e capturado;
+- **recorder** — gravador com quadros e áudio sintéticos: buraco de quadros vira repetição, trilha Opus, duração, remux para MP4, nada de arquivo vazio, cores BT.709 e orientação, NV12 vindo da GPU, pixels exatos no sem perda, mixagem do jogo com o microfone (volume, microfone desconectado, trilhas separadas);
+- **audio-capture** — PipeWire + WirePlumber privados: um seno tocado pelo próprio processo é achado pelo PID e capturado; uma fonte mono de teste aparece na lista de microfones da janela, no medidor e é gravada em estéreo;
 - **gui** — janela em `QT_QPA_PLATFORM=offscreen` com cliques e teclas simulados: canto pela prévia, atalhos por teclado e mouse, atalho repetido recusado, formato, confirmação Sim/Não, modo automático e recarga de mudança externa.
 
 O build i686 roda `gl-state` e `layer-validation` em 32 bits. `framux-gui --snapshot <pasta>` salva imagens das quatro abas.
@@ -355,14 +366,14 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits. `framux-gui --snap
                                                  framux (CLI)┘
 ```
 
-| Diretório                | Papel                                                                                                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/common`             | protocolo IPC, ring, config TOML, contador de FPS, fonte de segmentos e máquina de estados do overlay                                                   |
-| `src/client`             | runtime por processo da camada/shim: thread de IPC, reconexão, leitura de teclas in-game via xcb (`dlopen`)                                             |
-| `src/layer`, `src/gl`    | camada Vulkan e shim OpenGL                                                                                                                             |
-| `src/core`               | estatísticas, formatos de benchmark, conversão/codificação de imagens, arbitragem                                                                       |
-| `src/daemon`, `src/cli`  | `framuxd` e `framux`; gravação (`recorder.cpp`, FFmpeg) e áudio do jogo (`game_audio.cpp`, PipeWire) numa biblioteca à parte, usada também pelos testes |
-| `include/framux/stats.h` | struct pública em `$XDG_RUNTIME_DIR/framux/stats`                                                                                                       |
+| Diretório                | Papel                                                                                                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/common`             | protocolo IPC, ring, config TOML, contador de FPS, fonte de segmentos e máquina de estados do overlay                                                                                |
+| `src/client`             | runtime por processo da camada/shim: thread de IPC, reconexão, leitura de teclas in-game via xcb (`dlopen`)                                                                          |
+| `src/layer`, `src/gl`    | camada Vulkan e shim OpenGL                                                                                                                                                          |
+| `src/core`               | estatísticas, formatos de benchmark, conversão/codificação de imagens, arbitragem                                                                                                    |
+| `src/daemon`, `src/cli`  | `framuxd` e `framux`; gravação (`recorder.cpp`, FFmpeg), áudio do jogo (`game_audio.cpp`) e microfone (`mic_audio.cpp`, PipeWire) numa biblioteca à parte, usada também pelos testes |
+| `include/framux/stats.h` | struct pública em `$XDG_RUNTIME_DIR/framux/stats`                                                                                                                                    |
 
 ## Decisões de implementação
 
@@ -373,6 +384,7 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits. `framux-gui --snap
 - **Vídeo sem o contador.** A cópia acontece antes do overlay, como no screenshot padrão; o contador fica vermelho só na tela.
 - **AV1 antes de H.264 no automático, sem HEVC.** Ver a tabela de codificadores: no Fedora sem RPM Fusion só AV1 toca liso em alta resolução.
 - **Áudio por ligações manuais no PipeWire.** O stream de captura não tem autoconnect; o daemon liga a ele só as saídas cujo nó (pipewire-pulse) ou client (streams nativos) tem o PID do jogo, incluindo as abertas durante a gravação. Buracos (jogo em silêncio) viram silêncio no arquivo, para o áudio não adiantar em relação ao vídeo.
+- **Mixagem no daemon, não no PipeWire.** Jogo e microfone chegam por streams separados e ficam alinhados pelo relógio de cada bloco. O trecho que os dois já cobrem é mixado (soma limitada a ±1) e codificado em cada trilha. Uma fonte que atrasa mais de 0,5 s em relação à outra (jogo calado, microfone desconectado) é completada com silêncio, para a mixagem não esperar por ela. O volume é aplicado quando o bloco chega, então uma mudança vale na hora. O microfone é ligado pelo WirePlumber (`target.object`), e um microfone mono vai para os dois canais.
 - **Nome da camada por arquitetura** (`VK_LAYER_FRAMUX_overlay_x86_64` e `VK_LAYER_FRAMUX_overlay_i686`, não `VK_LAYER_FRAMUX_overlay`): com os dois manifestos instalados e o mesmo nome, o loader pega o de 32 bits num processo 64 bits, rejeita ("wrong bit-type") e descarta o outro como duplicado. Para desligar use `DISABLE_FRAMUX=1`, que vale para os dois.
 - **libstdc++ estática na camada e no shim** (`-static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL`): eles rodam dentro do jogo, que pode trazer outra libstdc++ (runtime da Steam, Flatpak); assim só dependem da libc (≥ 2.38).
 - **Steam Flatpak por cópias e override, não extensão Flatpak**: uma extensão `org.freedesktop.Platform.VulkanLayer.*` exigiria publicar no Flathub; as cópias em `~/.var/app` ficam no mesmo caminho dentro do sandbox e dos containers da Steam (pressure-vessel) e funcionam com o RPM.
