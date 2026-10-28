@@ -60,6 +60,14 @@
 
 <br>
 
+<p align="center">
+  <img src="assets/images/framux-gif.gif" width="640" alt="Demonstração do overlay do Framux dentro do jogo, com o contador de FPS no canto da tela">
+  <br>
+  <sub>Demonstração do contador de FPS do Framux</sub>
+</p>
+
+<br>
+
 ## Destaques
 
 <table>
@@ -137,12 +145,12 @@ Tudo pode ser trocado na janela: clique no botão do atalho e pressione a tecla 
 
 ### A janela
 
-| Aba       | O que tem                                                                                                                                                                                            |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Geral     | modo automático, abrir ao entrar na sessão, iniciar minimizado, bandeja; à direita, o estado do ambiente e "Parar o Framux"                                                                          |
-| FPS       | prévia clicável do canto do overlay, atalhos, cor do contador, frame time, modo de atualização; benchmark: atalho, duração, arquivos, pasta                                                          |
-| Gravações | atalho, FPS do vídeo (30/60/outro), tamanho cheio ou metade, codificador (os que faltam aparecem desabilitados, com o motivo), qualidade, converter para MP4, pasta, som do jogo, gravações recentes |
-| Capturas  | atalho, formato (PNG/JPG/BMP/TGA) e qualidade, incluir contador, série a cada N s, pasta e miniaturas                                                                                                |
+| Aba       | O que tem                                                                                                                                                                                                        |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Geral     | modo automático, abrir ao entrar na sessão, iniciar minimizado, bandeja; à direita, o estado do ambiente e "Parar o Framux"                                                                                      |
+| FPS       | prévia clicável do canto do overlay, atalhos, cor do contador, frame time, modo de atualização; benchmark: atalho, duração, arquivos, pasta                                                                      |
+| Gravações | atalho, FPS do vídeo (30/60/outro), tamanho cheio ou metade, codificador (só os detectados nesta máquina; aviso quando usa o processador), qualidade, converter para MP4, pasta, som do jogo, gravações recentes |
+| Capturas  | atalho, formato (PNG/JPG/BMP/TGA) e qualidade, incluir contador, série a cada N s, pasta e miniaturas                                                                                                            |
 
 As alterações vão para o `config.toml` na hora e chegam aos jogos já abertos. Fechar a janela não para o monitoramento: com bandeja, o Framux fica no ícone (no GNOME, a bandeja exige a extensão AppIndicator).
 
@@ -176,16 +184,18 @@ framux config default                 # config padrão comentável
 
 Gravações em `$XDG_VIDEOS_DIR/framux/<jogo> AAAA-MM-DD HH-MM-SS-cc.mkv` (ou `.mp4` com _Converter para MP4_): vídeo em taxa constante e a trilha "Game" em Opus 48 kHz estéreo. O MKV é escrito durante a gravação, então sobrevive se o jogo travar; o MP4 é um remux dele ao parar, sem recodificar (Ut Video fica em MKV). Uma notificação mostra o arquivo, a duração e o tamanho.
 
-| Codificador            | Encoders do FFmpeg                                                                      | Observação                                                                                               |
-| ---------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Automático             | o primeiro que funcionar: AV1 por hardware, H.264 por hardware, SVT-AV1, x264, Ut Video | detectados ao iniciar o daemon (`framuxd --probe-encoders`)                                              |
-| AV1 (placa de vídeo)   | `av1_nvenc` (RTX 40+), `av1_vaapi` (AMD RX 7000+, Intel Arc)                            |                                                                                                          |
-| AV1 (processador)      | `libsvtav1`, preset 10                                                                  | sempre no `ffmpeg-free`; ~90 fps em 2560×1080 num i5-9400F                                               |
-| H.264 (placa de vídeo) | `h264_nvenc`, `h264_vaapi`                                                              | no Fedora, VA-API exige `mesa-va-drivers-freeworld` (RPM Fusion)                                         |
-| H.264 (processador)    | `libx264`                                                                               | só com o FFmpeg do RPM Fusion                                                                            |
-| Ut Video sem perda     | `utvideo` em RGB planar, preditor mediana                                               | qualidade _Sem perda_ força este; ~230 fps em 2560×1080 num i5-9400F, 5 GB ou mais por minuto em 1080p60 |
+| Codificador            | Encoders do FFmpeg                                                                      | Observação                                                                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Automático             | o primeiro que funcionar: AV1 por hardware, H.264 por hardware, SVT-AV1, x264, Ut Video | detectados ao iniciar o daemon (`framuxd --probe-encoders`); só os detectados aparecem na lista                                                |
+| AV1 (placa de vídeo)   | `av1_nvenc` (RTX 40+), `av1_vaapi` (AMD RX 7000+, Intel Arc)                            |                                                                                                                                                |
+| AV1 (processador)      | `libsvtav1`, preset 10                                                                  | sempre no `ffmpeg-free`; ~90 fps em 2560×1080 num i5-9400F livre, mas jogando perde quase metade dos quadros                                   |
+| H.264 (placa de vídeo) | `h264_nvenc`, `h264_vaapi`                                                              | no Fedora, VA-API exige `mesa-va-drivers-freeworld` (RPM Fusion); jogando, nenhum quadro perdido                                               |
+| H.264 (processador)    | `libx264`                                                                               | só com o FFmpeg do RPM Fusion                                                                                                                  |
+| Ut Video sem perda     | `utvideo` em RGB planar, preditor mediana, metade dos núcleos                           | qualidade _Sem perda_ força este; ~230 fps em 2560×1080 num i5-9400F livre, 5 GB ou mais por minuto em 1080p60; jogando, derruba o FPS do jogo |
 
 Codificador da placa primeiro, porque grava quase sem CPU; AV1 antes de H.264 quando a placa tem os dois, porque os arquivos ficam menores.
+
+**Jogando.** Em 2560×1080 a 60 fps na qualidade alta, num i5-9400F (6 núcleos, sem hyper-threading) com GTX 1650, antes dos ajustes abaixo: o H.264 pela placa não perdeu quadros, com qualidade razoável; o SVT-AV1 gravou quase metade dos quadros; o Ut Video travava o jogo, com quedas bruscas de FPS. Os codificadores do processador disputam os núcleos com o jogo, e o Ut Video ainda recebe o quadro em RGB (4 bytes por pixel, em vez dos 1,5 do NV12 convertido na placa) e escreve 85 MB/s ou mais no disco. Por isso as threads de conversão e codificação rodam com nice 10 quando o codificador é do processador (o jogo vence a disputa e a gravação descarta quadros), e o Ut Video usa só metade dos núcleos. A aba Gravações avisa quando o codificador escolhido usa o processador. Para gravar jogando, use o da placa de vídeo.
 
 **Teto de taxa.** A qualidade é constante, com teto por resolução e FPS (`src/common/video_rate.h`): 0,12 bit por pixel por quadro na qualidade alta, 0,08 na média e 0,05 na baixa, ~35 % menos em AV1. Em 2560×1080 a 60 fps, H.264 alto fica em até 20 Mbit/s (~150 MB/min), contra 50–65 Mbit/s sem teto em cenas pesadas. A aba Gravações mostra a estimativa para a sua tela.
 
@@ -230,7 +240,7 @@ O Steam do Flathub (`com.valvesoftware.Steam`) roda num sandbox que não vê `/u
 Feche e abra o Steam depois de mudar. As cópias são renovadas quando a janela ou o daemon iniciam; `framux flatpak disable` desfaz tudo e devolve o override como estava.
 
 > [!TIP]
-> Left 4 Dead 2 nativo é OpenGL de 32 bits: precisa de `framux-layer.i686` e do `framux-run`, ou da opção `-vulkan` (Vulkan 32 bits, ativado pelo modo automático).
+> Jogos antigos como o Left 4 Dead 2 é OpenGL de 32 bits: precisa de `framux-layer.i686` e do `framux-run`, ou da opção `-vulkan` (Vulkan 32 bits, ativado pelo modo automático).
 
 ## Configuração
 
@@ -361,7 +371,7 @@ O build i686 roda `gl-state` e `layer-validation` em 32 bits. `framux-gui --snap
 - **Arredondamento da janela de 1 s.** O intervalo que cruza a borda é arredondado para o vizinho mais próximo: o quadro mais antigo dentro da janela deixa de contar quando a borda está mais perto dele do que do primeiro quadro de fora. Contar sempre "+1" faria 60 Hz com jitter oscilar entre 60 e 62; assim fica em 60 estáveis.
 - **Modo automático pela sessão, não por jogo.** Além da injeção sob demanda (`framux run`), a GUI tem o modo automático: `FRAMUX=1` e `FRAMUX_AUTO=1` em `environment.d` carregam a camada em todo app Vulkan, e ela só age em jogos (Steam, Wine/Proton ou `[filters] include`). Nos demais (apps GTK 4, navegadores) fica transparente: nenhuma função de swapchain ou present é interceptada.
 - **GUI**: abas Geral, FPS, Gravações e Capturas no topo. Sem moc (callbacks em vez de signals/slots próprios). Fechar a janela nunca para o monitoramento, que é do daemon; "Parar o Framux" para o daemon e fecha a janela.
-- **Gravação por cópia em memória compartilhada, com a cor convertida na GPU.** No Vulkan, a camada copia o quadro para um buffer na memória da placa e um compute shader (`src/layer/rgb_to_nv12.comp`) escreve NV12 BT.709 de faixa limitada, já na metade do tamanho se pedido, no buffer *host-visible* que a CPU lê: 1,5 byte por pixel em vez de 4 (60% menos tráfego e cópia na thread do jogo) e nenhuma conversão no processador. No sem perda (RGB), em OpenGL (anel de 3 PBOs) ou se a fila não tiver compute, o quadro vai em RGB e o daemon converte (swscale em fatias paralelas). Daí para um de 4 slots num memfd compartilhado; o daemon converte o que faltar numa thread e devolve o slot na hora; outra thread codifica, com até 16 quadros convertidos na fila entre as duas para absorver a abertura do encoder e os picos do SVT-AV1. Sem slot livre, o quadro é descartado e o daemon repete o anterior: o jogo nunca espera o encoder (`backpressure = "drop"`). O zero-copy por DMA-BUF fica para o M6.
+- **Gravação por cópia em memória compartilhada, com a cor convertida na GPU.** No Vulkan, a camada copia o quadro para um buffer na memória da placa e um compute shader (`src/layer/rgb_to_nv12.comp`) escreve NV12 BT.709 de faixa limitada, já na metade do tamanho se pedido, no buffer _host-visible_ que a CPU lê: 1,5 byte por pixel em vez de 4 (60% menos tráfego e cópia na thread do jogo) e nenhuma conversão no processador. No sem perda (RGB), em OpenGL (anel de 3 PBOs) ou se a fila não tiver compute, o quadro vai em RGB e o daemon converte (swscale em fatias paralelas). Daí para um de 4 slots num memfd compartilhado; o daemon converte o que faltar numa thread e devolve o slot na hora; outra thread codifica, com até 16 quadros convertidos na fila entre as duas para absorver a abertura do encoder e os picos do SVT-AV1. Sem slot livre, o quadro é descartado e o daemon repete o anterior: o jogo nunca espera o encoder (`backpressure = "drop"`). O zero-copy por DMA-BUF fica para o M6.
 - **Vídeo sem o contador.** A cópia acontece antes do overlay, como no screenshot padrão; o contador fica vermelho só na tela.
 - **AV1 antes de H.264 no automático, sem HEVC.** Ver a tabela de codificadores: no Fedora sem RPM Fusion só AV1 toca liso em alta resolução.
 - **Áudio por ligações manuais no PipeWire.** O stream de captura não tem autoconnect; o daemon liga a ele só as saídas cujo nó (pipewire-pulse) ou client (streams nativos) tem o PID do jogo, incluindo as abertas durante a gravação. Buracos (jogo em silêncio) viram silêncio no arquivo, para o áudio não adiantar em relação ao vídeo.
