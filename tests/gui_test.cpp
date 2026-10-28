@@ -14,6 +14,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cstdio>
@@ -133,6 +134,19 @@ int main(int argc, char **argv) {
   if (auto *game = find<QCheckBox>(w, "audioGame")) game->setChecked(false);
   if (auto *vol = find<QSlider>(w, "audioMicVolume")) vol->setValue(65);
   if (auto *vol = find<QSlider>(w, "audioGameVolume")) vol->setValue(30);
+
+  // A roda do mouse sobre combos e sliders não muda o valor (rola a página).
+  auto *quality = find<QComboBox>(w, "videoQuality");
+  auto *mic_vol = find<QSlider>(w, "audioMicVolume");
+  if (!quality || !mic_vol) return 1;
+  const int quality_before = quality->currentIndex();
+  for (QWidget *target : {static_cast<QWidget *>(quality), static_cast<QWidget *>(mic_vol)}) {
+    QWheelEvent wheel(QPointF(5, 5), target->mapToGlobal(QPointF(5, 5)), {}, {0, -120}, Qt::NoButton, {},
+                      Qt::NoScrollPhase, false);
+    QApplication::sendEvent(target, &wheel);
+  }
+  CHECK(quality->currentIndex() == quality_before);
+  CHECK(mic_vol->value() == 65);
 
   // Atalho repetido é recusado.
   w.select_tab(3);

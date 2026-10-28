@@ -26,6 +26,7 @@
 #include <QRadioButton>
 #include <QScreen>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -109,6 +110,23 @@ QString check(bool ok, const QString &text) {
   return QString("<span style='color:%1'>●</span> %2").arg(ok ? "#3ec46d" : "#e5534b", text);
 }
 
+// A roda do mouse sobre combos, caixas de número e sliders rola a página em
+// vez de mudar o valor: rolando a aba, o cursor passa por cima deles.
+class WheelToPage : public QObject {
+ public:
+  using QObject::QObject;
+
+  bool eventFilter(QObject *o, QEvent *e) override {
+    if (e->type() != QEvent::Wheel) return false;
+    for (QWidget *p = static_cast<QWidget *>(o)->parentWidget(); p; p = p->parentWidget())
+      if (auto *area = qobject_cast<QAbstractScrollArea *>(p)) {
+        QApplication::sendEvent(area->verticalScrollBar(), e);
+        break;
+      }
+    return true;
+  }
+};
+
 }  // namespace
 
 MainWindow::MainWindow(ConfigStore &store) : store_(store), audio_devices_(std::make_unique<AudioDevices>()) {
@@ -150,6 +168,11 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store), audio_devices_(std::
   pages_ = new QStackedWidget(central);
   for (QWidget *page : {build_general(), build_fps(), build_recordings(), build_screenshots()})
     pages_->addWidget(scrollable(page));
+  auto *wheel = new WheelToPage(this);
+  for (QWidget *w : pages_->findChildren<QWidget *>())
+    if (qobject_cast<QComboBox *>(w) || qobject_cast<QAbstractSpinBox *>(w) ||
+        (qobject_cast<QAbstractSlider *>(w) && !qobject_cast<QScrollBar *>(w)))
+      w->installEventFilter(wheel);
   v->addWidget(pages_, 1);
   tabs_->on_change = [this](int i) {
     pages_->setCurrentIndex(i);
