@@ -4,7 +4,7 @@
 %bcond tests 0
 
 Name:           framux
-Version:        0.4.4
+Version:        0.4.5
 Release:        1%{?dist}
 Summary:        Contador de FPS, benchmark, screenshots e gravação para jogos no Linux
 License:        MIT
@@ -107,6 +107,14 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.framux.desk
 %{_datadir}/vulkan/implicit_layer.d/framux_*.json
 
 %changelog
+* Wed Oct 28 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.5-1
+- Gravação do microfone: fonte escolhida na aba Gravações (ou a padrão do
+  sistema), volumes do jogo e do microfone só na gravação e medidor de nível
+- Jogo e microfone saem mixados na primeira trilha ("Mix"); opcionalmente
+  também em trilhas separadas ("Game" e "Microphone") para edição
+- Janela: a roda do mouse rola a página em vez de mudar combos, sliders e
+  caixas de número; sai a opção de frame time da aba FPS
+
 * Tue Oct 27 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.4-1
 - Gravação: com codificador no processador (SVT-AV1, x264, Ut Video), as
   threads de conversão e codificação rodam com nice 10, para o jogo não
