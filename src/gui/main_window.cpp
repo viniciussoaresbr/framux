@@ -340,8 +340,6 @@ QWidget *MainWindow::build_fps() {
   f->addRow("Alternar canto", hotkey_row(overlay_corner_key_, ov));
   color_ = new ColorButton(ov);
   f->addRow("Cor do contador", color_);
-  frametime_ = new QCheckBox("Mostrar frame time (ms)", ov);
-  f->addRow("", frametime_);
   auto *upd = new QWidget(ov);
   auto *ul = new QVBoxLayout(upd);
   ul->setContentsMargins(0, 0, 0, 0);
@@ -369,11 +367,6 @@ QWidget *MainWindow::build_fps() {
     store_.edit([c](Config &cfg) { cfg.overlay.color_normal = c; });
     preview_->set_state(store_.get().overlay.corner, c, store_.get().overlay.show_frametime);
   };
-  connect(frametime_, &QCheckBox::toggled, this, [this](bool on) {
-    if (loading_) return;
-    store_.edit([on](Config &c) { c.overlay.show_frametime = on; });
-    preview_->set_state(store_.get().overlay.corner, store_.get().overlay.color_normal, on);
-  });
   connect(update_once_, &QRadioButton::toggled, this, [this](bool on) {
     if (!loading_) store_.edit([on](Config &c) { c.overlay.update = on ? FpsMode::OncePerSecond : FpsMode::Smooth; });
   });
@@ -899,7 +892,6 @@ void MainWindow::load_from_config() {
   overlay_key_->set_hotkey(c.hotkeys.overlay);
   overlay_corner_key_->set_hotkey(c.hotkeys.overlay_corner);
   color_->set_color(c.overlay.color_normal);
-  frametime_->setChecked(c.overlay.show_frametime);
   (c.overlay.update == FpsMode::OncePerSecond ? update_once_ : update_smooth_)->setChecked(true);
   bench_key_->set_hotkey(c.hotkeys.benchmark);
   bench_stop_->setChecked(c.benchmark.stop_after_s > 0);

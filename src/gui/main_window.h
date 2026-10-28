@@ -102,7 +102,6 @@ class MainWindow : public QMainWindow {
   HotkeyButton *overlay_key_ = nullptr;
   HotkeyButton *overlay_corner_key_ = nullptr;
   ColorButton *color_ = nullptr;
-  QCheckBox *frametime_ = nullptr;
   QRadioButton *update_smooth_ = nullptr;
   QRadioButton *update_once_ = nullptr;
   HotkeyButton *bench_key_ = nullptr;
