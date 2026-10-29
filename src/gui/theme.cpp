@@ -36,7 +36,9 @@ QPalette dark_palette() {
   p.setColor(QPalette::Highlight, kAccent);
   p.setColor(QPalette::HighlightedText, QColor(0x16, 0x19, 0x1e));
   p.setColor(QPalette::Link, kAccent);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)  // Ubuntu 24.04 tem o Qt 6.4
   p.setColor(QPalette::Accent, kAccent);
+#endif
   for (auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText})
     p.setColor(QPalette::Disabled, role, QColor(0x6c, 0x6d, 0x73));
   return p;

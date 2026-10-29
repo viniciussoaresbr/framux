@@ -87,11 +87,19 @@ AVPixelFormat src_format(uint32_t vk) {
 
 // Primeiro formato de `want` aceito pelo encoder.
 AVPixelFormat pick_format(const AVCodec *codec, std::initializer_list<AVPixelFormat> want) {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 13, 100)
   const void *list = nullptr;
   int n = 0;
   if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, &list, &n) < 0 || !list)
     return *want.begin();
   const auto *fmts = static_cast<const AVPixelFormat *>(list);
+#else
+  // Antes do FFmpeg 7.1: lista terminada em AV_PIX_FMT_NONE.
+  const AVPixelFormat *fmts = codec->pix_fmts;
+  if (!fmts) return *want.begin();
+  int n = 0;
+  while (fmts[n] != AV_PIX_FMT_NONE) ++n;
+#endif
   for (AVPixelFormat w : want)
     for (int i = 0; i < n; ++i)
       if (fmts[i] == w) return w;
@@ -247,8 +255,14 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
   return true;
 }
 
-// AVIO sobre o fd criado com O_EXCL|O_NOFOLLOW (§C.11.5).
-int fd_write(void *opaque, const uint8_t *buf, int n) {
+// AVIO sobre o fd criado com O_EXCL|O_NOFOLLOW (§C.11.5). O buffer é const
+// a partir do FFmpeg 7 (libavformat 61); o Ubuntu 24.04 tem o 6.1.
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+using AvioBuf = const uint8_t *;
+#else
+using AvioBuf = uint8_t *;
+#endif
+int fd_write(void *opaque, AvioBuf buf, int n) {
   const int fd = *static_cast<int *>(opaque);
   int done = 0;
   while (done < n) {
@@ -360,10 +374,79 @@ EncoderProbe probe_encoders() {
   };
   if (!has("h264_hw"))
     p.missing =
+#if FRAMUX_DEBIAN
+        "H.264 por placa de vídeo indisponível. AMD: instale mesa-va-drivers; Intel: intel-media-va-driver-non-free; "
+#else
         "H.264 por placa de vídeo indisponível. AMD/Intel: instale mesa-va-drivers-freeworld do RPM Fusion; "
+#endif
         "NVIDIA: use o driver proprietário.";
   return p;
 }
+
+// ---------------------------------------------------------------------------
+// Conversão de cor
+
+// No FFmpeg 8 (libswscale 9), o sws_scale_frame configura o contexto pelos
+// próprios quadros. Antes dele (Ubuntu 24.04, Debian 13), o contexto é montado
+// para cada tamanho e formato, com a matriz e a faixa de cor de cada quadro.
+struct Scaler {
+  int flags = 0;    // 0: padrão do libswscale
+  int threads = 0;  // 0: padrão do libswscale
+  SwsContext *ctx = nullptr;
+#if LIBSWSCALE_VERSION_MAJOR < 9
+  int key[6] = {};
+#endif
+
+  SwsContext *alloc() {
+    ctx = sws_alloc_context();
+    if (ctx && flags) av_opt_set_int(ctx, "sws_flags", flags, 0);
+    if (ctx && threads) av_opt_set_int(ctx, "threads", threads, 0);
+    return ctx;
+  }
+
+  int scale(AVFrame *dst, const AVFrame *src) {
+#if LIBSWSCALE_VERSION_MAJOR >= 9
+    if (!ctx && !alloc()) return AVERROR(ENOMEM);
+    return sws_scale_frame(ctx, dst, src);
+#else
+    // Mesmo formato e tamanho (NV12 da GPU para encoder NV12): cópia direta.
+    // O sws_scale antigo não copia o plano UV do NV12 nesse caso.
+    if (src->format == dst->format && src->width == dst->width && src->height == dst->height)
+      return av_frame_copy(dst, src);
+    const int k[6] = {src->width, src->height, src->format, dst->width, dst->height, dst->format};
+    if (!ctx || !std::equal(k, k + 6, key)) {
+      reset();
+      if (!alloc()) return AVERROR(ENOMEM);
+      av_opt_set_int(ctx, "srcw", src->width, 0);
+      av_opt_set_int(ctx, "srch", src->height, 0);
+      av_opt_set_int(ctx, "src_format", src->format, 0);
+      av_opt_set_int(ctx, "dstw", dst->width, 0);
+      av_opt_set_int(ctx, "dsth", dst->height, 0);
+      av_opt_set_int(ctx, "dst_format", dst->format, 0);
+      if (const int r = sws_init_context(ctx, nullptr, nullptr); r < 0) {
+        reset();
+        return r;
+      }
+      std::copy(k, k + 6, key);
+      auto coefs = [](const AVFrame *f) {
+        return sws_getCoefficients(f->colorspace == AVCOL_SPC_RGB ? SWS_CS_DEFAULT : f->colorspace);
+      };
+      sws_setColorspaceDetails(ctx, coefs(src), src->color_range == AVCOL_RANGE_JPEG, coefs(dst),
+                               dst->color_range == AVCOL_RANGE_JPEG, 0, 1 << 16, 1 << 16);
+    }
+    return sws_scale(ctx, src->data, src->linesize, 0, src->height, dst->data, dst->linesize);
+#endif
+  }
+
+  void reset() {
+#if LIBSWSCALE_VERSION_MAJOR >= 9
+    sws_free_context(&ctx);
+#else
+    sws_freeContext(ctx);
+    ctx = nullptr;
+#endif
+  }
+};
 
 // ---------------------------------------------------------------------------
 // Recorder
@@ -410,7 +493,7 @@ struct Recorder::Impl {
   RecorderResult result;  // dropped é da conversão; o resto, do encoder
 
   // Só a thread de conversão.
-  SwsContext *sws = nullptr;
+  Scaler sws;
   AVFrame *src = nullptr;  // embrulha o slot, sem cópia
   AVPixelFormat planned = AV_PIX_FMT_NONE;
   bool planned_cpu = false;  // planned é de um encoder no processador
@@ -425,7 +508,7 @@ struct Recorder::Impl {
   uint8_t *avio_buf = nullptr;
   OpenEncoder venc;
   AVStream *vst = nullptr;
-  SwsContext *resws = nullptr;  // encoder de reserva com outro formato
+  Scaler resws;                 // encoder de reserva com outro formato
   AVFrame *last = nullptr;      // último quadro enviado, para repetir em buracos
   AVPacket *pkt = nullptr;
   bool started = false;
@@ -523,9 +606,8 @@ struct Recorder::Impl {
       conv_started = true;
       // RGB→YUV de 2560×1080 leva ~7 ms num núcleo; em fatias, ~2 ms.
       const long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-      sws = sws_alloc_context();
-      av_opt_set_int(sws, "sws_flags", SWS_BILINEAR, 0);
-      av_opt_set_int(sws, "threads", std::clamp<long>(cpus / 2, 1, 4), 0);
+      sws.flags = SWS_BILINEAR;
+      sws.threads = int(std::clamp<long>(cpus / 2, 1, 4));
       src = av_frame_alloc();
     }
     const int64_t index = std::llround(double(v.present_ns - std::min(v.present_ns, conv_start_ns)) * opt.fps / 1e9);
@@ -563,7 +645,7 @@ struct Recorder::Impl {
       src->data[0] += size_t(v.height - 1) * v.stride;
       src->linesize[0] = -int(v.stride);
     }
-    const int r = sws_scale_frame(sws, out, src);
+    const int r = sws.scale(out, src);
     v.release();  // o slot volta para a camada o quanto antes
     if (r < 0) {
       av_frame_free(&out);
@@ -601,7 +683,7 @@ struct Recorder::Impl {
       else
         convert(v);
     }
-    sws_free_context(&sws);
+    sws.reset();
     av_frame_free(&src);
     {
       std::lock_guard lk(mu);
@@ -763,8 +845,7 @@ struct Recorder::Impl {
       set_color(conv, is_rgb(venc.sw_format));
       int r = av_frame_get_buffer(conv, 0);
       if (r >= 0) {
-        if (!resws) resws = sws_alloc_context();
-        r = sws_scale_frame(resws, conv, frame);
+        r = resws.scale(conv, frame);
       }
       av_frame_free(&frame);
       if (r < 0) {
@@ -934,7 +1015,7 @@ struct Recorder::Impl {
     }
     av_frame_free(&last);
     av_packet_free(&pkt);
-    sws_free_context(&resws);
+    resws.reset();
     for (AudioTrack &t : tracks) {
       av_audio_fifo_free(t.fifo);
       avcodec_free_context(&t.enc);

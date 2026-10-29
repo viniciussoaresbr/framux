@@ -26,11 +26,15 @@ datadir = get_option('datadir')
 # Biblioteca da camada/shim: /usr/lib64/framux (x86_64) ou /usr/lib/framux (i686).
 framux_libdir = libdir / 'framux'
 
+# Debian/Ubuntu (multiarch): libdir = lib/<tripla>, como o $LIB do ld.so.
+multiarch = libdir.startswith('lib/') and libdir.endswith('-linux-gnu')
+
 # Caminho do shim para o LD_PRELOAD do wrapper. O token $LIB do ld.so resolve
-# para lib64 ou lib conforme a classe ELF do processo, então um único valor
+# para lib64 ou lib (Fedora), ou lib/x86_64-linux-gnu ou lib/i386-linux-gnu
+# (Debian/Ubuntu), conforme a classe ELF do processo, então um único valor
 # atende jogos 64 e 32 bits.
 lib_token_dir = prefix / '$LIB' / 'framux'
-if libdir.contains('/')
+if libdir.contains('/') and not multiarch
   # libdir absoluto e fora do padrão: sem token, só a arquitetura nativa.
   lib_token_dir = libdir / 'framux'
 endif
@@ -42,7 +46,9 @@ conf.set_quoted('FRAMUX_LIBEXEC_DAEMON', prefix / get_option('bindir') / 'framux
 conf.set_quoted('FRAMUX_BINDIR', prefix / get_option('bindir'))
 # Camada e shim de cada arquitetura, copiados para o Steam Flatpak.
 conf.set_quoted('FRAMUX_LIBDIR64', prefix / libdir / 'framux')
-conf.set_quoted('FRAMUX_LIBDIR32', prefix / 'lib' / 'framux')
+conf.set_quoted('FRAMUX_LIBDIR32', prefix / (multiarch ? 'lib/i386-linux-gnu' : 'lib') / 'framux')
+# Dicas de instalação com apt em vez de dnf.
+conf.set10('FRAMUX_DEBIAN', multiarch)
 conf.set_quoted('FRAMUX_DATADIR', prefix / datadir)
 conf.set_quoted('FRAMUX_SYSCONFDIR', prefix / get_option('sysconfdir'))
 configure_file(output : 'framux_build_config.h', configuration : conf)

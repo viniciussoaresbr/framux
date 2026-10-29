@@ -35,9 +35,10 @@ if layer_only
   subdir_done()
 endif
 
-catch2_dep = dependency('catch2', required : false)
+# Os testes usam a API do Catch2 v2 (catch2/catch.hpp); Debian/Ubuntu só têm a v3.
+catch2_dep = dependency('catch2', version : '<3', required : false)
 if not catch2_dep.found()
-  catch2_dep = dependency('catch2-with-main', required : false)
+  catch2_dep = dependency('catch2-with-main', version : '<3', required : false)
 endif
 
 if catch2_dep.found()
@@ -48,7 +49,7 @@ if catch2_dep.found()
     dependencies : [framux_core_dep, catch2_dep, x11_headers])
   test('unit', unit, timeout : 120)
 else
-  warning('Catch2 não encontrado: testes unitários desativados')
+  warning('Catch2 v2 não encontrado: testes unitários desativados')
 endif
 
 png_probe = executable('png_probe', files('png_probe.cpp'), dependencies : png_dep)

@@ -26,6 +26,14 @@ namespace {
 
 int g_problems = 0;
 
+#if FRAMUX_DEBIAN
+constexpr const char *kInstallLayer32 = "sudo dpkg --add-architecture i386 && sudo apt install framux-layer:i386";
+constexpr const char *kInstallLoader = "sudo apt install libvulkan1";
+#else
+constexpr const char *kInstallLayer32 = "dnf install framux-layer.i686";
+constexpr const char *kInstallLoader = "dnf install vulkan-loader";
+#endif
+
 void ok(const std::string &s) { std::printf("  \033[32m✓\033[0m %s\n", s.c_str()); }
 void warn(const std::string &s) { std::printf("  \033[33m!\033[0m %s\n", s.c_str()); }
 void bad(const std::string &s) {
@@ -155,22 +163,23 @@ int cmd_doctor(const std::vector<std::string> &) {
       bad(m.path + ": biblioteca ausente ou inválida (" + m.library + ")");
   }
   if (!have64) bad("camada x86_64 não encontrada (pacote framux-layer)");
-  if (!have32) warn("camada i686 não encontrada: jogos 32 bits sem contador (dnf install framux-layer.i686)");
+  if (!have32) warn(std::string("camada i686 não encontrada: jogos 32 bits sem contador (") + kInstallLayer32 + ")");
   if (void *h = dlopen("libvulkan.so.1", RTLD_LAZY | RTLD_LOCAL)) {
     ok("loader Vulkan (libvulkan.so.1) presente");
     dlclose(h);
   } else {
-    bad("loader Vulkan ausente (dnf install vulkan-loader)");
+    bad(std::string("loader Vulkan ausente (") + kInstallLoader + ")");
   }
 
   section("Shim OpenGL");
   const std::string shim = gl_preload_path();
   if (shim.find("$LIB") != std::string::npos) {
-    for (const char *lib : {"lib64", "lib"}) {
-      std::string p = shim;
-      p.replace(p.find("$LIB"), 4, lib);
+    // O $LIB vira o diretório de cada arquitetura (lib64/lib no Fedora,
+    // lib/x86_64-linux-gnu e lib/i386-linux-gnu no Debian/Ubuntu).
+    for (const char *dir : {FRAMUX_LIBDIR64, FRAMUX_LIBDIR32}) {
+      const std::string p = std::string(dir) + "/libframux_gl.so";
       const int bits = elf_class(p);
-      const bool is64 = std::strcmp(lib, "lib64") == 0;
+      const bool is64 = std::strcmp(dir, FRAMUX_LIBDIR64) == 0;
       if (bits)
         ok(p + " (" + std::to_string(bits) + " bits)");
       else if (is64)
