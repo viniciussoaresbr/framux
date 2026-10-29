@@ -100,7 +100,7 @@
 
 ## Instalação
 
-Os RPMs da versão **0.4.5** (Fedora 44) ficam em [`rpm/`](rpm/):
+Os RPMs da versão **0.4.5** (Fedora 44) ficam na [página de releases](https://github.com/viniciussoaresbr/framux/releases/latest):
 
 | Pacote                                 | Conteúdo                                                |
 | -------------------------------------- | ------------------------------------------------------- |
@@ -111,8 +111,9 @@ Os RPMs da versão **0.4.5** (Fedora 44) ficam em [`rpm/`](rpm/):
 Instale os três juntos (as dependências, como `ffmpeg-free` e `pipewire`, vêm do repositório do Fedora):
 
 ```sh
-git clone https://github.com/viniciussoaresbr/framux.git && cd framux
-sudo dnf install ./rpm/framux-*.x86_64.rpm ./rpm/framux-layer-*.i686.rpm
+base=https://github.com/viniciussoaresbr/framux/releases/download/v0.4.5
+sudo dnf install $base/framux-0.4.5-1.fc44.x86_64.rpm \
+  $base/framux-layer-0.4.5-1.fc44.x86_64.rpm $base/framux-layer-0.4.5-1.fc44.i686.rpm
 ```
 
 Depois:
