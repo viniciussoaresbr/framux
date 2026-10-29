@@ -48,7 +48,7 @@ sed -i -e 's/^Architecture: .*/Architecture: i386/' \
 dpkg-deb --root-owner-group -Zxz --build /p32 "../framux-layer_${version}_i386.deb"
 
 # Nome do arquivo sem o "~" (o GitHub o troca nos anexos das releases):
-# framux_0.4.5-1~deb13_amd64.deb → framux_0.4.5-1_debian13_amd64.deb.
+# framux_0.4.6-1~deb13_amd64.deb → framux_0.4.6-1_debian13_amd64.deb.
 for f in ../framux_*.deb ../framux-layer_*.deb; do
   cp "$f" "/out/$(basename "$f" | sed "s/~${suffix}_/_${ID}${VERSION_ID}_/")"
 done

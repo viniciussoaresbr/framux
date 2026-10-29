@@ -3,8 +3,8 @@
 #   packaging/build-deb.sh                 # debian13, ubuntu24.04 e ubuntu26.04
 #   packaging/build-deb.sh ubuntu24.04     # só uma
 # Saída em deb/: framux_<v>_<distro>_amd64.deb, framux-layer_<v>_<distro>_amd64.deb
-# e framux-layer_<v>_<distro>_i386.deb (ex.: framux_0.4.5-1_ubuntu24.04_amd64.deb;
-# dentro do pacote, a versão é 0.4.5-1~ubuntu24.04).
+# e framux-layer_<v>_<distro>_i386.deb (ex.: framux_0.4.6-1_ubuntu24.04_amd64.deb;
+# dentro do pacote, a versão é 0.4.6-1~ubuntu24.04).
 set -eu
 cd "$(dirname "$0")/.."
 

@@ -1,3 +1,11 @@
+framux (0.4.6-1) unstable; urgency=medium
+
+  * Mesma versão do RPM 0.4.6-1: compila com FFmpeg 6.1 a 8 e Qt 6.4 a 6.10,
+    layout multiarch no shim e no `framux doctor` e gravação com FFmpeg
+    6.1/7.1 sem perder a cor do NV12 vindo da GPU.
+
+ -- Vinicius Soares <viniciussoaresmbr@gmail.com>  Thu, 29 Oct 2026 21:00:00 -0300
+
 framux (0.4.5-1) unstable; urgency=medium
 
   * Primeira versão em .deb (Debian 13, Ubuntu 24.04 e Ubuntu 26.04), com o
