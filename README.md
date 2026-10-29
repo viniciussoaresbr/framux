@@ -18,6 +18,7 @@
   <img alt="C++" src="https://img.shields.io/badge/C%2B%2B-Meson-00599c?style=flat-square&logo=cplusplus&logoColor=white">
   <img alt="Qt 6" src="https://img.shields.io/badge/GUI-Qt%206-41cd52?style=flat-square&logo=qt&logoColor=white">
   <img alt="Fedora 44" src="https://img.shields.io/badge/RPM-Fedora%2044-51a2da?style=flat-square&logo=fedora&logoColor=white">
+  <img alt="Debian 13 · Ubuntu 24.04 · 26.04" src="https://img.shields.io/badge/DEB-Debian%2013%20%C2%B7%20Ubuntu%2024.04%20%C2%B7%2026.04-a80030?style=flat-square&logo=debian&logoColor=white">
   <img alt="Versão 0.4.5" src="https://img.shields.io/badge/vers%C3%A3o-0.4.5-c6f432?style=flat-square">
   <img alt="Licença: MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-3a3a3a?style=flat-square">
   <img alt="Estado: alfa" src="https://img.shields.io/badge/estado-alfa-d69e2e?style=flat-square">
@@ -100,7 +101,9 @@
 
 ## Instalação
 
-Os RPMs da versão **0.4.5** (Fedora 44) ficam na [página de releases](https://github.com/viniciussoaresbr/framux/releases/latest):
+Os pacotes da versão **0.4.5** ficam na [página de releases](https://github.com/viniciussoaresbr/framux/releases/latest).
+
+### Fedora 44
 
 | Pacote                                 | Conteúdo                                                |
 | -------------------------------------- | ------------------------------------------------------- |
@@ -116,13 +119,35 @@ sudo dnf install $base/framux-0.4.5-1.fc44.x86_64.rpm \
   $base/framux-layer-0.4.5-1.fc44.x86_64.rpm $base/framux-layer-0.4.5-1.fc44.i686.rpm
 ```
 
-Depois:
+### Debian 13, Ubuntu 24.04 e Ubuntu 26.04
+
+Um conjunto de `.deb` por distro (vale também para derivadas, como Linux Mint 22 e Pop!_OS 24.04, que usam a base do Ubuntu 24.04):
+
+| Pacote                                          | Conteúdo                                                |
+| ----------------------------------------------- | ------------------------------------------------------- |
+| `framux_0.4.5-1_<distro>_amd64.deb`             | janela, CLI, daemon, unidades systemd do usuário, ícone |
+| `framux-layer_0.4.5-1_<distro>_amd64.deb`       | camada Vulkan e shim OpenGL para jogos 64 bits          |
+| `framux-layer_0.4.5-1_<distro>_i386.deb`        | o mesmo para jogos 32 bits                              |
+
+Com `<distro>` = `debian13`, `ubuntu24.04` ou `ubuntu26.04`. O pacote i386 precisa da arquitetura i386 habilitada (quem instalou a Steam pelo apt já tem):
+
+```sh
+d=ubuntu24.04   # ou debian13, ubuntu26.04
+base=https://github.com/viniciussoaresbr/framux/releases/download/v0.4.5
+cd /tmp && wget $base/framux_0.4.5-1_${d}_amd64.deb \
+  $base/framux-layer_0.4.5-1_${d}_amd64.deb $base/framux-layer_0.4.5-1_${d}_i386.deb
+sudo dpkg --add-architecture i386 && sudo apt update
+sudo apt install ./framux_0.4.5-1_${d}_amd64.deb \
+  ./framux-layer_0.4.5-1_${d}_amd64.deb ./framux-layer_0.4.5-1_${d}_i386.deb
+```
+
+### Depois de instalar
 
 1. abra **Framux** no menu de aplicativos (isso habilita o `framuxd.socket` e, com o Steam Flatpak integrado, renova as cópias da camada);
 2. feche e abra o Steam e os jogos que estavam abertos.
 
-**Atualizar:** rode o mesmo comando com os RPMs novos (`sudo dnf reinstall` se a versão for a mesma).
-**Remover:** `framux flatpak disable` (se integrou ao Steam Flatpak) e `sudo dnf remove framux framux-layer`.
+**Atualizar:** rode o mesmo comando com os pacotes novos (`sudo dnf reinstall` / `sudo apt reinstall` se a versão for a mesma).
+**Remover:** `framux flatpak disable` (se integrou ao Steam Flatpak) e `sudo dnf remove framux framux-layer` ou `sudo apt remove framux framux-layer framux-layer:i386`.
 **Do código-fonte:** veja [Compilar](#compilar).
 
 ## Uso
@@ -333,7 +358,21 @@ ninja -C build32
 
 Sem `qt6-qtbase-devel` a GUI é pulada (`-Dgui=enabled` a torna obrigatória).
 
+Dependências no Debian/Ubuntu (o mesmo código compila no Debian 13 e nos Ubuntu 24.04 e 26.04, com FFmpeg 6.1 a 8 e Qt 6.4 a 6.10):
+
+```sh
+sudo apt install g++ g++-multilib meson pkgconf libvulkan-dev vulkan-utility-libraries-dev \
+  libx11-dev libxcb1-dev libxcb-xinput-dev libgl-dev libegl-dev libtomlplusplus-dev \
+  libpng-dev libjpeg-dev libsystemd-dev libavcodec-dev libavformat-dev libavutil-dev \
+  libswscale-dev libpipewire-0.3-dev qt6-base-dev desktop-file-utils
+meson setup build --libdir=lib/x86_64-linux-gnu && ninja -C build
+```
+
+Os testes unitários usam o Catch2 v2; Debian e Ubuntu só têm a v3, então lá eles são pulados (os de integração rodam).
+
 **RPM:** [`packaging/framux.spec`](packaging/framux.spec) gera `framux` (GUI, CLI, daemon, unidades systemd user, `.desktop` e ícone) e `framux-layer` (camada + shim + manifesto). Para jogos 32 bits, gere também o `framux-layer.i686` com `rpmbuild -bb --target i686`.
+
+**DEB:** [`packaging/build-deb.sh`](packaging/build-deb.sh) gera os mesmos pacotes (mais o `framux-layer` i386) para Debian 13, Ubuntu 24.04 e Ubuntu 26.04 em contêineres podman, sem sudo, a partir de [`packaging/debian/`](packaging/debian/). A saída fica em `deb/`.
 
 <details>
 <summary><b>Testes</b></summary>

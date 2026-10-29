@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=meson
+
+override_dh_auto_configure:
+	dh_auto_configure -- -Dgui=enabled -Dtests=false -Dsystemd_user_unit_dir=/usr/lib/systemd/user
+
+override_dh_auto_install:
+	dh_auto_install
+	desktop-file-validate debian/tmp/usr/share/applications/io.github.framux.desktop
+
+# Como no RPM: quem habilita o framuxd.socket é a janela, na primeira abertura.
+override_dh_installsystemduser:
+	dh_installsystemduser --no-enable

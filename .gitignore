@@ -1,6 +1,8 @@
 /build*/
 /subprojects/packagecache/
 *.rpm
+*.deb
+/deb/
 *.tar.gz
 compile_commands.json
 .cache/

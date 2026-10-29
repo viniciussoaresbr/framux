@@ -1,0 +1,59 @@
+Source: framux
+Section: games
+Priority: optional
+Maintainer: Vinicius Soares <viniciussoaresmbr@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               meson (>= 1.1),
+               pkgconf,
+               g++,
+# Camada e shim de 32 bits (framux-layer:i386), gerados com gcc -m32.
+               g++-multilib,
+               libvulkan-dev,
+               vulkan-utility-libraries-dev,
+               libx11-dev,
+               libxcb1-dev,
+               libxcb-xinput-dev,
+               libgl-dev,
+               libegl-dev,
+               libtomlplusplus-dev,
+               libpng-dev,
+               libjpeg-dev,
+               libsystemd-dev,
+               libavcodec-dev,
+               libavformat-dev,
+               libavutil-dev,
+               libswscale-dev,
+               libpipewire-0.3-dev,
+               qt6-base-dev,
+               desktop-file-utils
+Standards-Version: 4.7.0
+Homepage: https://github.com/viniciussoaresbr/framux
+Rules-Requires-Root: no
+
+Package: framux
+Architecture: amd64
+Depends: framux-layer (= ${binary:Version}),
+         qt6-qpa-plugins,
+         ${shlibs:Depends},
+         ${misc:Depends}
+Recommends: libvulkan1,
+            qt6-wayland
+Description: contador de FPS, benchmark, screenshots e gravação para jogos
+ Framux é uma alternativa nativa ao FRAPS para Linux: contador de FPS dentro
+ do jogo (Vulkan, OpenGL e todo Direct3D via Proton/DXVK/VKD3D), benchmark por
+ hotkey com CSV moderno, screenshots e gravação do jogo com o áudio dele.
+ Janela de configuração com abas Geral, FPS, Gravações e Capturas, ícone na
+ bandeja e modo automático para jogos da Steam/Proton, inclusive o Steam
+ Flatpak. Sem rede e sem telemetria.
+ .
+ Para jogos 32 bits, instale também framux-layer:i386.
+
+Package: framux-layer
+Architecture: amd64 i386
+Multi-Arch: same
+Depends: ${shlibs:Depends},
+         ${misc:Depends}
+Description: camada Vulkan e shim OpenGL do Framux
+ Camada Vulkan implícita (ativa só com FRAMUX=1) e shim OpenGL para
+ LD_PRELOAD que medem o tempo de apresentação, desenham o contador e capturam
+ quadros. Instale também a variante i386 para jogos 32 bits.
