@@ -4,7 +4,7 @@
 %bcond tests 0
 
 Name:           framux
-Version:        0.4.6
+Version:        0.4.7
 Release:        1%{?dist}
 Summary:        Contador de FPS, benchmark, screenshots e gravação para jogos no Linux
 License:        MIT
@@ -107,6 +107,11 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.framux.desk
 %{_datadir}/vulkan/implicit_layer.d/framux_*.json
 
 %changelog
+* Sat Oct 31 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.7-1
+- Gravação: quadros que caem no mesmo slot do vídeo vão para o seguinte, em
+  vez de virar descarte e repetição (vídeo mais fluido com o jogo perto da
+  taxa do vídeo)
+
 * Thu Oct 29 2026 Vinicius Soares <viniciussoaresmbr@gmail.com> - 0.4.6-1
 - Pacotes .deb para Debian 13, Ubuntu 24.04 e Ubuntu 26.04 (amd64 e i386)
 - Compila com FFmpeg 6.1 a 8 e Qt 6.4 a 6.10; layout multiarch

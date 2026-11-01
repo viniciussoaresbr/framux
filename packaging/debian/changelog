@@ -1,3 +1,13 @@
+framux (0.4.7-1) unstable; urgency=medium
+
+  * Gravação de jogos Direct3D/OpenGL no Windows fluida em tela cheia
+    exclusiva e com a GPU cheia: quadros da captura direto ao NVENC/AMF pela
+    GPU (sem passar pela memória), pool de captura maior e cópias sem
+    esperar a GPU. Quadros que caem no mesmo slot do vídeo vão para o
+    seguinte em vez de virar descarte e repetição.
+
+ -- Vinicius Soares <viniciussoaresmbr@gmail.com>  Sat, 31 Oct 2026 23:55:00 -0300
+
 framux (0.4.6-1) unstable; urgency=medium
 
   * Mesma versão do RPM 0.4.6-1: compila com FFmpeg 6.1 a 8 e Qt 6.4 a 6.10,

@@ -1,6 +1,6 @@
 ; Instalador do Framux para Windows (NSIS 3, Unicode).
 ; Gerado por packaging/windows/build-dist.sh, que passa:
-;   /DVERSION=0.4.6  /DSRC=<pasta com os arquivos>  /DOUT=<instalador .exe>
+;   /DVERSION=0.4.7  /DSRC=<pasta com os arquivos>  /DOUT=<instalador .exe>
 ;
 ; O que faz além de copiar os arquivos:
 ;  - registra a camada Vulkan em HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers;
