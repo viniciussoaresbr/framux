@@ -16,6 +16,11 @@
 
 #include "common/hotkey.h"
 #include "common/paths.h"
+#ifdef _WIN32
+#include <filesystem>
+
+#include "common/win_util.h"
+#endif
 
 namespace framux {
 
@@ -284,7 +289,12 @@ Schema make_schema(Config &cfg) {
 }
 
 std::string read_file(const std::string &path, bool *exists) {
+#ifdef _WIN32
+  // Caminho em UTF-8; o ifstream de char usaria a página de código do jogo.
+  std::ifstream in(std::filesystem::path(win::widen(path)), std::ios::binary);
+#else
   std::ifstream in(path, std::ios::binary);
+#endif
   *exists = bool(in);
   if (!in) return {};
   std::ostringstream ss;

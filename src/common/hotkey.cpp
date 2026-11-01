@@ -1,6 +1,6 @@
 #include "common/hotkey.h"
 
-#include <X11/keysym.h>
+#include "common/keysyms.h"
 
 #include <cctype>
 #include <cstdio>

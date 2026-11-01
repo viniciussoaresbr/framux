@@ -1,6 +1,6 @@
 #include "gui/widgets.h"
 
-#include <X11/keysym.h>
+#include "common/keysyms.h"
 
 #include <QApplication>
 #include <QColorDialog>

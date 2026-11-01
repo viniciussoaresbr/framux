@@ -13,11 +13,23 @@ project('framux', ['c', 'cpp'],
 cpp = meson.get_compiler('cpp')
 is_64bit = cpp.sizeof('void*') == 8
 layer_only = get_option('layer_only')
+# Windows (MSYS2/MinGW-w64): mesma arquitetura, com named pipes, WASAPI,
+# camada Vulkan registrada no registro e framux_hook.dll para D3D/OpenGL.
+is_windows = host_machine.system() == 'windows'
 
 add_project_arguments(
   cpp.get_supported_arguments(['-Wno-missing-field-initializers', '-Wno-unused-parameter']),
   '-D_GNU_SOURCE',
   language : 'cpp')
+if is_windows
+  # Windows 10 1903+ (SetThreadDescription, página de código UTF-8, loopback
+  # de processo no WASAPI a partir do 2004); localtime_r/gmtime_r do MinGW.
+  add_project_arguments('-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00', '-DNTDDI_VERSION=0x0A000008',
+    '-DUNICODE', '-D_UNICODE', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-D_POSIX_THREAD_SAFE_FUNCTIONS=200112L',
+    # printf do MinGW (C99: %zu, %llu) em vez do verificador de formato da msvcrt.
+    '-D__USE_MINGW_ANSI_STDIO=1',
+    language : ['c', 'cpp'])
+endif
 
 prefix = get_option('prefix')
 libdir = get_option('libdir')
@@ -56,12 +68,18 @@ config_inc = include_directories('.')
 
 # Camada e shim rodam dentro do jogo, às vezes com outra libstdc++ (runtime da
 # Steam, Flatpak): libstdc++/libgcc entram estáticas e sem exportar símbolos.
-inject_link_args = cpp.get_supported_link_arguments(['-Wl,--no-undefined', '-Wl,-z,nodelete'])
-static_cxx = ['-static-libstdc++', '-static-libgcc', '-Wl,--exclude-libs,ALL']
-if cpp.has_multi_link_arguments(static_cxx)
-  inject_link_args += static_cxx
+if is_windows
+  # No Windows tudo estático (libstdc++, libgcc, winpthread): as DLLs que
+  # entram no jogo só dependem de DLLs do sistema.
+  inject_link_args = ['-static', '-static-libgcc', '-static-libstdc++', '-Wl,--exclude-all-symbols']
 else
-  warning('libstdc++-static ausente: camada e shim dependerão da libstdc++ do jogo')
+  inject_link_args = cpp.get_supported_link_arguments(['-Wl,--no-undefined', '-Wl,-z,nodelete'])
+  static_cxx = ['-static-libstdc++', '-static-libgcc', '-Wl,--exclude-libs,ALL']
+  if cpp.has_multi_link_arguments(static_cxx)
+    inject_link_args += static_cxx
+  else
+    warning('libstdc++-static ausente: camada e shim dependerão da libstdc++ do jogo')
+  endif
 endif
 
 thread_dep = dependency('threads')
@@ -70,8 +88,12 @@ dl_dep = cpp.find_library('dl', required : false)
 # carregadas com dlopen ou já estão no processo do jogo). No build i686 os .pc
 # de 64 bits não servem, então cai para a checagem direta do cabeçalho.
 header_deps = {}
-foreach name, header : {'vulkan' : 'vulkan/vulkan.h', 'x11' : 'X11/Xlib.h', 'gl' : 'GL/glx.h', 'egl' : 'EGL/egl.h',
-                        'xcb' : 'xcb/xinput.h'}
+header_list = {'vulkan' : 'vulkan/vulkan.h', 'x11' : 'X11/Xlib.h', 'gl' : 'GL/glx.h', 'egl' : 'EGL/egl.h',
+               'xcb' : 'xcb/xinput.h'}
+if is_windows
+  header_list = {'vulkan' : 'vulkan/vulkan.h', 'gl' : 'GL/glext.h'}
+endif
+foreach name, header : header_list
   d = dependency(name, required : false)
   if d.found()
     header_deps += {name : d.partial_dependency(compile_args : true, includes : true)}
@@ -92,32 +114,62 @@ endif
 toml_dep = declare_dependency()
 
 vulkan_headers = header_deps['vulkan']
-x11_headers = [header_deps['x11'], header_deps['xcb']]
 gl_headers = header_deps['gl']
-egl_headers = header_deps['egl']
+if is_windows
+  x11_headers = []
+  egl_headers = []
+  win_libs = {}
+  foreach l : ['user32', 'gdi32', 'shell32', 'ole32', 'oleaut32', 'advapi32', 'uuid', 'dxguid', 'mmdevapi', 'avrt',
+               'ksuser', 'psapi', 'dwmapi', 'shlwapi', 'version']
+    win_libs += {l : cpp.find_library(l, required : l not in ['mmdevapi', 'dxguid', 'avrt', 'ksuser'])}
+  endforeach
+else
+  x11_headers = [header_deps['x11'], header_deps['xcb']]
+  egl_headers = header_deps['egl']
+endif
 
 inc = include_directories('include', 'src')
+
+# Ícone e manifesto (página de código UTF-8, DPI, Windows 10+) nos .exe.
+windows_res = []
+if is_windows and not layer_only
+  windows_res = import('windows').compile_resources('packaging/windows/framux.rc',
+    depend_files : files('packaging/windows/framux.manifest', 'assets/icons/framux.ico'))
+endif
 
 subdir('src/common')
 subdir('src/client')
 subdir('src/layer')
-subdir('src/gl')
+# No Windows, jogos D3D/OpenGL são medidos e capturados de fora (ETW e
+# Windows Graphics Capture, no daemon); só o Vulkan tem camada no jogo.
+if not is_windows
+  subdir('src/gl')
+endif
 
 if not layer_only
   png_dep = dependency('libpng', required : true)
   jpeg_dep = dependency('libjpeg', required : true)
-  systemd_dep = dependency('libsystemd', required : true)
-  x11_dep = dependency('x11', required : true)
+  if is_windows
+    systemd_dep = []
+    x11_dep = []
+  else
+    systemd_dep = dependency('libsystemd', required : true)
+    x11_dep = dependency('x11', required : true)
+  endif
 
   subdir('src/core')
   subdir('src/daemon')
   subdir('src/cli')
   subdir('src/gui')
-  subdir('data')
+  if is_windows
+    subdir('packaging/windows')
+  else
+    subdir('data')
+  endif
   install_headers('include/framux/stats.h', subdir : 'framux')
 endif
 
-if get_option('tests')
+if get_option('tests') and not is_windows
   subdir('tests')
 endif
 

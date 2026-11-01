@@ -25,6 +25,10 @@ using namespace framux::gui;
 namespace {
 
 QString instance_socket() {
+#ifdef _WIN32
+  // QLocalServer no Windows é um named pipe: só o nome, sem pasta.
+  return "framux-gui-" + QString::fromLocal8Bit(qgetenv("USERNAME"));
+#endif
   const std::string dir = framux::runtime_dir();
   if (dir.empty()) return "framux-gui";
   QDir().mkpath(QString::fromStdString(dir));

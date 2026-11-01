@@ -6,3 +6,5 @@ option('systemd_user_unit_dir', type : 'string', value : '',
   description : 'Diretório das unidades systemd --user (padrão: <prefix>/lib/systemd/user)')
 option('gui', type : 'feature', value : 'auto',
   description : 'Janela de configuração em Qt 6 (framux-gui)')
+option('recording', type : 'feature', value : 'auto',
+  description : 'Gravação de vídeo (FFmpeg); auto liga se o FFmpeg for encontrado')

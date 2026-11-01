@@ -1,0 +1,5 @@
+// Ícone e manifesto comuns aos executáveis do Framux no Windows.
+#include <winuser.h>
+
+1 ICON "../../assets/icons/framux.ico"
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "framux.manifest"

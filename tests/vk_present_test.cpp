@@ -1,10 +1,16 @@
 // App Vulkan mínimo (xcb + swapchain + clear) usado nos testes da camada,
 // inclusive no build i686, onde não há vkcube 32 bits.
-// uso: vk_present_test [segundos]   (padrão: roda até ser morto)
+// uso: vk_present_test [segundos] [largura altura]   (padrão: roda até ser morto, 640x480)
+#ifdef _WIN32
+#define VK_USE_PLATFORM_WIN32_KHR
+#include <windows.h>
+#else
 #define VK_USE_PLATFORM_XCB_KHR
-#include <vulkan/vulkan.h>
 #include <xcb/xcb.h>
+#endif
+#include <vulkan/vulkan.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -20,17 +26,33 @@
   } while (0)
 
 int main(int argc, char **argv) {
-  const double seconds = argc > 1 ? std::atof(argv[1]) : 1e9;
+  const double seconds = argc > 1 && std::atof(argv[1]) > 0 ? std::atof(argv[1]) : 1e9;
+  const uint32_t win_w = argc > 3 ? uint32_t(std::atoi(argv[2])) : 640, win_h = argc > 3 ? uint32_t(std::atoi(argv[3])) : 480;
+#ifdef _WIN32
+  WNDCLASSW wc{};
+  wc.lpfnWndProc = DefWindowProcW;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"vk_present_test";
+  RegisterClassW(&wc);
+  RECT rc{0, 0, LONG(win_w), LONG(win_h)};
+  AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+  HWND hwnd = CreateWindowW(wc.lpszClassName, L"vk_present_test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
+                            CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, wc.hInstance,
+                            nullptr);
+  if (!hwnd) return 77;
+  const char *inst_ext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+#else
   xcb_connection_t *c = xcb_connect(nullptr, nullptr);
   if (xcb_connection_has_error(c)) return 77;
   xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(c)).data;
   const xcb_window_t win = xcb_generate_id(c);
-  xcb_create_window(c, XCB_COPY_FROM_PARENT, win, screen->root, 0, 0, 640, 480, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+  xcb_create_window(c, XCB_COPY_FROM_PARENT, win, screen->root, 0, 0, uint16_t(win_w), uint16_t(win_h), 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
                     screen->root_visual, 0, nullptr);
   xcb_map_window(c, win);
   xcb_flush(c);
 
   const char *inst_ext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_EXTENSION_NAME};
+#endif
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
   app.pApplicationName = "vk_present_test";
   app.apiVersion = VK_API_VERSION_1_1;
@@ -41,11 +63,21 @@ int main(int argc, char **argv) {
   VkInstance inst;
   VK(vkCreateInstance(&ici, nullptr, &inst));
 
+#ifdef _WIN32
+  VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+  sci.hinstance = wc.hInstance;
+  sci.hwnd = hwnd;
+#else
   VkXcbSurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR};
   sci.connection = c;
   sci.window = win;
+#endif
   VkSurfaceKHR surface;
+#ifdef _WIN32
+  VK(vkCreateWin32SurfaceKHR(inst, &sci, nullptr, &surface));
+#else
   VK(vkCreateXcbSurfaceKHR(inst, &sci, nullptr, &surface));
+#endif
 
   uint32_t n = 1;
   VkPhysicalDevice phys;
@@ -91,7 +123,7 @@ int main(int argc, char **argv) {
   swci.minImageCount = caps.minImageCount + 1;
   swci.imageFormat = formats[0].format;
   swci.imageColorSpace = formats[0].colorSpace;
-  swci.imageExtent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{640, 480};
+  swci.imageExtent = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{win_w, win_h};
   swci.imageArrayLayers = 1;
   swci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   swci.preTransform = caps.currentTransform;
@@ -128,7 +160,13 @@ int main(int argc, char **argv) {
     vkCmdPipelineBarrier(cmds[i], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &b);
     VkClearColorValue blue{{0.0f, 0.0f, 1.0f, 1.0f}};
-    vkCmdClearColorImage(cmds[i], images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &blue, 1, &b.subresourceRange);
+    // VK_TEST_LOAD=N: N limpezas por quadro, para simular um jogo limitado pela GPU.
+    const char *load_env = std::getenv("VK_TEST_LOAD");
+    const int load = load_env ? std::max(1, std::atoi(load_env)) : 1;
+    for (int k = 0; k < load; ++k) {
+      blue.float32[0] = float(k % 7) / 7.0f;
+      vkCmdClearColorImage(cmds[i], images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &blue, 1, &b.subresourceRange);
+    }
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b.dstAccessMask = 0;
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -154,6 +192,9 @@ int main(int argc, char **argv) {
   const auto start = std::chrono::steady_clock::now();
   uint64_t frame = 0;
   while (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds) {
+#ifdef _WIN32
+    for (MSG msg; PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE);) DispatchMessageW(&msg);
+#endif
     const int f = int(frame++ % kFrames);
     vkWaitForFences(dev, 1, &fences[f], VK_TRUE, UINT64_MAX);
     vkResetFences(dev, 1, &fences[f]);
@@ -190,6 +231,10 @@ int main(int argc, char **argv) {
   vkDestroyDevice(dev, nullptr);
   vkDestroySurfaceKHR(inst, surface, nullptr);
   vkDestroyInstance(inst, nullptr);
+#ifdef _WIN32
+  DestroyWindow(hwnd);
+#else
   xcb_disconnect(c);
+#endif
   return 0;
 }

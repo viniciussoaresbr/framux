@@ -33,11 +33,17 @@ class MainQueue {
   MainQueue();
   ~MainQueue();
   int fd() const { return fd_; }
+#ifdef _WIN32
+  void *event() const { return event_; }  // sinalizado quando há callbacks
+#endif
   void post(std::function<void()> fn);
   void run_pending();
 
  private:
   int fd_;
+#ifdef _WIN32
+  void *event_ = nullptr;
+#endif
   std::mutex mu_;
   std::deque<std::function<void()>> q_;
 };

@@ -72,6 +72,23 @@ class Recorder {
   void push_video(const uint8_t *data, uint32_t width, uint32_t height, uint32_t stride, uint32_t vk_format,
                   bool flip_y, bool halved, uint64_t present_ns, std::function<void()> release);
 
+#ifdef _WIN32
+  // Gravação pela GPU (captura de fora do jogo no Windows): os quadros ficam
+  // em texturas D3D11 do começo ao fim. O recorte BGRA da captura é copiado
+  // e convertido para NV12 (BT.709 limitado) na GPU e vai direto ao NVENC ou
+  // ao AMF, sem passar pela memória: nada de cópia lida pela CPU, conversão
+  // no processador nem envio de volta para a GPU, que disputavam a GPU com o
+  // jogo.
+  //
+  // gpu_open: antes do primeiro quadro, com o ID3D11Device da captura e o
+  // tamanho do recorte. false se o encoder escolhido não aceita quadros da
+  // GPU (QSV, encoders no processador): a captura segue pela memória.
+  // gpu_push: na thread da captura (o contexto do dispositivo é dela).
+  // `texture` (ID3D11Texture2D BGRA) só precisa valer durante a chamada.
+  bool gpu_open(void *device, uint32_t width, uint32_t height);
+  void gpu_push(void *texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint64_t present_ns);
+#endif
+
   // Amostras float intercaladas, 2 canais, 48 kHz; `time_ns` é o
   // CLOCK_MONOTONIC da primeira amostra. Pode ser chamado de qualquer thread.
   void push_audio(AudioSource src, const float *samples, uint32_t frames, uint64_t time_ns);

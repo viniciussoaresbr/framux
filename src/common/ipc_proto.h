@@ -47,13 +47,18 @@ struct MsgHeader {
   uint32_t size;  // payload em bytes, sem o cabeçalho
 };
 
-enum class Api : uint32_t { Unknown = 0, Vulkan = 1, GlGlx = 2, GlEgl = 3 };
+// D3D* e GlWgl só existem no Windows (framux_hook.dll).
+enum class Api : uint32_t { Unknown = 0, Vulkan = 1, GlGlx = 2, GlEgl = 3, D3D9 = 4, D3D11 = 5, D3D12 = 6, GlWgl = 7 };
 
 inline const char *api_name(Api a) {
   switch (a) {
     case Api::Vulkan: return "vulkan";
     case Api::GlGlx: return "gl_glx";
     case Api::GlEgl: return "gl_egl";
+    case Api::D3D9: return "d3d9";
+    case Api::D3D11: return "d3d11";
+    case Api::D3D12: return "d3d12";
+    case Api::GlWgl: return "gl_wgl";
     default: return "unknown";
   }
 }
@@ -159,8 +164,8 @@ struct VideoFrame {
 struct VideoCost {
   uint64_t cpu_ns;  // soma
   uint64_t max_ns;  // pior quadro
-  uint32_t frames;  // quadros entregues
-  uint32_t _pad;
+  uint32_t frames;       // quadros entregues
+  uint32_t gpu_skipped;  // quadros que ficaram de fora sem buffer livre (GPU atrasada); 0 em camadas antigas
 };
 
 struct ConfigMsg {

@@ -9,6 +9,10 @@
 #include <QTimer>
 
 #include <memory>
+#ifdef _WIN32
+#include <atomic>
+#include <thread>
+#endif
 
 #include "gui/audio_devices.h"
 #include "gui/settings.h"
@@ -27,6 +31,9 @@ namespace framux::gui {
 class MainWindow : public QMainWindow {
  public:
   explicit MainWindow(ConfigStore &store);
+#ifdef _WIN32
+  ~MainWindow() override;
+#endif
 
   // Mostra a janela (ou só a bandeja, se `minimized` e houver bandeja).
   void present(bool minimized);
@@ -51,6 +58,13 @@ class MainWindow : public QMainWindow {
   QString check_hotkey(const std::string &h, const std::string Config::Hotkeys::*self) const;
 
   void poll_status();
+#ifdef _WIN32
+  // Eventos do framuxd (Notify → balão da bandeja), numa thread própria.
+  void notify_thread_main();
+  std::thread notify_thread_;
+  std::atomic<bool> notify_stop_{false};
+  std::atomic<bool> polling_{false};
+#endif
   void apply_status(const QByteArray &json);
   void set_status(const QString &dot_color, const QString &text);
   void update_environment();

@@ -8,15 +8,27 @@
 
 namespace framux {
 
+#ifdef _WIN32
+void log_msg(const char *fmt, ...) __attribute__((format(__MINGW_PRINTF_FORMAT, 1, 2)));
+// Também grava o log em `path` (o framuxd não tem console no Windows).
+void log_to_file(const char *path);
+#else
 void log_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#endif
 // Nível de detalhe por FRAMUX_DEBUG=1.
 bool debug_enabled();
 
+#ifdef _WIN32
+// QueryPerformanceCounter: o relógio monotônico do sistema, igual em todos os
+// processos (jogo e daemon comparam timestamps).
+uint64_t now_ns();
+#else
 inline uint64_t now_ns() {
   timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return uint64_t(ts.tv_sec) * 1'000'000'000ull + uint64_t(ts.tv_nsec);
 }
+#endif
 
 }  // namespace framux
 

@@ -1,3 +1,8 @@
+if is_windows
+  subdir('windows')
+  subdir_done()
+endif
+
 # Gravação: FFmpeg (ffmpeg-free-devel no Fedora) e PipeWire (pipewire-devel).
 video_deps = []
 foreach name : ['libavcodec', 'libavformat', 'libavutil', 'libswscale', 'libpipewire-0.3']

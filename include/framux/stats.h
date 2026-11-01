@@ -1,6 +1,8 @@
 /* Interface pública de estatísticas do Framux (§C.3.3).
  *
  * O framuxd mantém $XDG_RUNTIME_DIR/framux/stats com este struct, atualizado
+ * (no Windows: a seção nomeada "Localramux-<sessão>-<usuário>-stats",
+ * aberta com OpenFileMapping/MapViewOfFile em FILE_MAP_READ),
  * a até 10 Hz, para widgets, LCDs, OBS e scripts. Abra com O_RDONLY e mmap
  * com PROT_READ. Leitura consistente: repita enquanto `seq` for ímpar ou
  * mudar entre o início e o fim da cópia (seqlock).
@@ -25,6 +27,10 @@ enum framux_stats_api {
   FRAMUX_API_VULKAN = 1,
   FRAMUX_API_GL_GLX = 2,
   FRAMUX_API_GL_EGL = 3,
+  FRAMUX_API_D3D9 = 4, /* só no Windows */
+  FRAMUX_API_D3D11 = 5,
+  FRAMUX_API_D3D12 = 6,
+  FRAMUX_API_GL_WGL = 7,
 };
 
 struct framux_stats {

@@ -1,5 +1,8 @@
 #include "client/runtime.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -9,11 +12,18 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#endif
 
 #include <cstdlib>
 #include <cstring>
 
+#ifdef _WIN32
+#include "client/win_input.h"
+#include "common/shm.h"
+#include "common/win_util.h"
+#else
 #include "client/x11_input.h"
+#endif
 #include "common/hotkey.h"
 #include "common/ipc_socket.h"
 #include "common/log.h"
@@ -46,8 +56,21 @@ class SpinGuard {
 
 bool stopped_by_user() {
   const std::string p = stopped_path();
+#ifdef _WIN32
+  return !p.empty() && GetFileAttributesW(win::widen(p).c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
   return !p.empty() && access(p.c_str(), F_OK) == 0;
+#endif
 }
+
+#ifdef _WIN32
+// Handles no lugar dos fds (mesmo valor de "nenhum").
+void close_fd(int fd) { shm::close(fd); }
+void unmap(void *p, size_t) { shm::unmap(p); }
+#else
+void close_fd(int fd) { close(fd); }
+void unmap(void *p, size_t size) { munmap(p, size); }
+#endif
 
 void copy_str(char *dst, size_t n, const std::string &src) {
   std::strncpy(dst, src.c_str(), n - 1);
@@ -71,6 +94,9 @@ bool Runtime::init(ipc::Api api) {
   static std::mutex init_mu;
   std::lock_guard lk(init_mu);
   if (ready_.load(std::memory_order_relaxed)) return enabled_;
+#ifdef _WIN32
+  const int pid = int(GetCurrentProcessId());
+#else
   static std::once_flag atfork;
   std::call_once(atfork, [] {
     // No filho de um fork() a thread de IPC não existe: reinicializa no
@@ -78,6 +104,7 @@ bool Runtime::init(ipc::Api api) {
     pthread_atfork(nullptr, nullptr, [] { Runtime::get().ready_.store(false, std::memory_order_relaxed); });
   });
   const int pid = getpid();
+#endif
   if (initialized_) {
     // Processo filho após fork(): a thread de IPC não existe aqui.
     thread_.detach();
@@ -122,7 +149,11 @@ bool Runtime::init(ipc::Api api) {
       copy_str(hello_.engine, sizeof hello_.engine, "wined3d");
   }
 
+#ifdef _WIN32
+  if (!wake_event_) wake_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+#else
   if (wake_fd_ < 0) wake_fd_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+#endif
   stop_ = false;
   rejected_ = false;
   stopped_.store(stopped_by_user(), std::memory_order_relaxed);
@@ -266,9 +297,13 @@ void Runtime::poll_input(uint64_t now) {
 
   if (!x11_ && !x11_tried_) {
     x11_tried_ = true;
-    x11_ = X11Input::open();
+    x11_ = InputBackend::open();
     if (x11_ && x11_window_) x11_->set_window(x11_window_);
+#ifdef _WIN32
+    FRAMUX_DEBUG("leitura de teclas in-game: %s", x11_ ? "GetAsyncKeyState" : "indisponível");
+#else
     FRAMUX_DEBUG("leitura de teclas in-game: %s", x11_ ? "X11" : "indisponível (sem DISPLAY)");
+#endif
   }
   if (!x11_) return;
 
@@ -321,13 +356,17 @@ bool Runtime::enqueue(ipc::MsgType type, const void *body, size_t len, int fd) {
   {
     std::lock_guard lk(out_mu_);
     if (out_.size() > 64) {  // daemon travado: descarta em vez de crescer
-      if (fd >= 0) close(fd);
+      if (fd != -1) close_fd(fd);
       return false;
     }
     out_.push_back(std::move(o));
   }
+#ifdef _WIN32
+  if (wake_event_) SetEvent(wake_event_);
+#else
   const uint64_t one = 1;
   if (wake_fd_ >= 0) (void)!write(wake_fd_, &one, sizeof one);
+#endif
   return true;
 }
 
@@ -353,7 +392,7 @@ void Runtime::set_video_locked(uint32_t fps, uint64_t now) {
 
 void Runtime::release_video_ring() {
   std::lock_guard lk(video_mu_);
-  if (video_ring_) munmap(video_ring_, video_ring_size_);
+  if (video_ring_) unmap(video_ring_, video_ring_size_);
   video_ring_ = nullptr;
   video_ring_size_ = 0;
   video_dropped_ = 0;
@@ -371,10 +410,19 @@ bool Runtime::video_write(const void *src, uint32_t width, uint32_t height, uint
   if (!video_ring_ || video_ring_->slot_bytes < need) {
     // Primeiro quadro ou janela maior: buffer novo, com folga para pequenos
     // redimensionamentos. O daemon mantém o antigo até largar os slots dele.
-    if (video_ring_) munmap(video_ring_, video_ring_size_);
+    if (video_ring_) unmap(video_ring_, video_ring_size_);
     video_ring_ = nullptr;
     const uint64_t slot_bytes = (need + need / 8 + 4095) & ~uint64_t(4095);
     const size_t bytes = video_ring_bytes(slot_bytes);
+#ifdef _WIN32
+    const int fd = shm::create(bytes);
+    void *map = shm::map(fd, nullptr, true);
+    if (!map) {
+      if (fd != -1) shm::close(fd);
+      FRAMUX_LOG_ONCE("sem memória para o buffer de vídeo (%zu MB)", bytes >> 20);
+      return true;
+    }
+#else
     const int fd = memfd_create("framux-video", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     void *map = MAP_FAILED;
     if (fd >= 0 && ftruncate(fd, off_t(bytes)) == 0)
@@ -385,6 +433,7 @@ bool Runtime::video_write(const void *src, uint32_t width, uint32_t height, uint
       return true;
     }
     fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL);
+#endif
     video_ring_ = static_cast<VideoRingHeader *>(map);
     video_ring_size_ = bytes;
     video_ring_->magic = kVideoRingMagic;
@@ -393,7 +442,7 @@ bool Runtime::video_write(const void *src, uint32_t width, uint32_t height, uint
     for (auto &st : video_ring_->state) st.store(kSlotFree, std::memory_order_relaxed);
     ipc::VideoBuffer vb{++video_generation_, 0};
     if (!enqueue(ipc::MsgType::VideoBuffer, &vb, sizeof vb, fd)) {
-      munmap(video_ring_, video_ring_size_);
+      unmap(video_ring_, video_ring_size_);
       video_ring_ = nullptr;
       return true;
     }
@@ -437,11 +486,153 @@ void Runtime::add_video_cost(uint64_t ns) {
   }
 }
 
+void Runtime::add_video_skip() {
+  if (!video_active()) return;
+  std::lock_guard lk(video_mu_);
+  if (++video_cost_.gpu_skipped >= 30) {
+    enqueue(ipc::MsgType::VideoCost, &video_cost_, sizeof video_cost_);
+    video_cost_ = {};
+  }
+}
+
 void Runtime::shutdown() {
   stop_ = true;
+#ifdef _WIN32
+  if (wake_event_) SetEvent(wake_event_);
+#else
   const uint64_t one = 1;
   if (wake_fd_ >= 0) (void)!write(wake_fd_, &one, sizeof one);
+#endif
 }
+
+#ifdef _WIN32
+int Runtime::connect_once() {
+  const int s = ipc::pipe_connect(socket_path(), 200);
+  if (s < 0) return -1;
+  ipc::Hello hello;
+  {
+    std::lock_guard pl(pending_mu_);
+    hello = hello_;
+  }
+  ipc::Message m;
+  if (!ipc::send_struct(s, ipc::MsgType::Hello, hello) || ipc::recv_msg(s, m) != ipc::RecvResult::Ok) {
+    ipc::pipe_close(s);
+    return -1;
+  }
+  if (m.type == ipc::MsgType::Reject) {
+    const auto *r = m.as<ipc::Reject>();
+    FRAMUX_LOG("framuxd recusou a conexão (protocolo %u, daemon %u): %.*s", ipc::kProtoVersion,
+               r ? r->proto_version : 0, r ? int(sizeof r->reason) : 0, r ? r->reason : "");
+    rejected_ = true;
+    ipc::pipe_close(s);
+    return -1;
+  }
+  const auto *w = m.as<ipc::Welcome>();
+  if (m.type != ipc::MsgType::Welcome || !w || m.nfds < 1 || w->proto_version != ipc::kProtoVersion) {
+    ipc::pipe_close(s);
+    return -1;
+  }
+  const int ring_h = m.take_fd(0);
+  size_t size = 0;
+  void *map = shm::map(ring_h, &size, true);
+  shm::close(ring_h);  // a view mantém a seção viva
+  if (!map || size < sizeof(RingHeader)) {
+    shm::unmap(map);
+    ipc::pipe_close(s);
+    return -1;
+  }
+  auto *ring = static_cast<RingHeader *>(map);
+  const uint32_t cap = ring->capacity;
+  if (ring->magic != kRingMagic || cap == 0 || (cap & (cap - 1)) || ring_bytes(cap) > size) {
+    shm::unmap(map);
+    ipc::pipe_close(s);
+    return -1;
+  }
+  const std::string toml = m.tail<ipc::Welcome>().substr(0, w->config_len);
+  FRAMUX_DEBUG("conectado ao framuxd (sessão %llu)", (unsigned long long)w->session_id);
+  {
+    std::lock_guard pl(pending_mu_);
+    pending_.config_toml = toml;
+    pending_.connected = true;
+    pending_.any = true;
+  }
+  {
+    SpinGuard g(present_lock_);
+    ring_ = ring;
+    ring_size_ = size;
+    connected_ = true;
+    last_focus_ = -1;
+  }
+  stopped_.store(false, std::memory_order_relaxed);
+  return s;
+}
+
+void Runtime::disconnect(int sock) {
+  RingHeader *ring;
+  {
+    SpinGuard g(present_lock_);
+    ring = ring_;
+    ring_ = nullptr;
+    connected_ = false;
+  }
+  if (ring) shm::unmap(ring);
+  ipc::pipe_close(sock);
+  release_video_ring();
+  std::lock_guard pl(pending_mu_);
+  pending_.connected = false;
+  pending_.video_fps = 0;
+  pending_.any = true;
+}
+
+void Runtime::drop_outgoing() {
+  std::lock_guard lk(out_mu_);
+  for (auto &o : out_)
+    if (o.fd != -1) shm::close(o.fd);
+  out_.clear();
+}
+
+void Runtime::ipc_thread_main() {
+  SetThreadDescription(GetCurrentThread(), L"framux-ipc");
+  // Quase sempre parada; acima das threads do jogo para os quadros da
+  // gravação e as respostas ao daemon não esperarem um jogo que ocupa a CPU.
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+  HANDLE wake = static_cast<HANDLE>(wake_event_);
+  while (!stop_) {
+    int sock = rejected_ ? -1 : connect_once();
+    if (sock < 0) {
+      // Daemon ausente: tenta de novo a cada segundo.
+      stopped_.store(stopped_by_user(), std::memory_order_relaxed);
+      drop_outgoing();
+      WaitForSingleObject(wake, rejected_ ? 60000 : 1000);
+      continue;
+    }
+    bool alive = true;
+    while (alive && !stop_) {
+      std::deque<Outgoing> batch;
+      {
+        std::lock_guard lk(out_mu_);
+        batch.swap(out_);
+      }
+      for (auto &o : batch) {
+        const int nfds = o.fd != -1 ? 1 : 0;
+        if (!ipc::send_msg(sock, o.type, o.body.data(), o.body.size(), nullptr, 0, &o.fd, nfds)) alive = false;
+        if (o.fd != -1) shm::close(o.fd);
+      }
+      if (!alive) break;
+      // Espera mensagem do daemon ou algo na fila de saída (wake).
+      ipc::Message m;
+      const auto r = ipc::recv_msg_wait(sock, m, wake, 1000);
+      if (r == ipc::RecvResult::Ok)
+        handle_message(m);
+      else if (r != ipc::RecvResult::WouldBlock)
+        alive = false;
+    }
+    if (!alive) FRAMUX_DEBUG("conexão com o framuxd perdida; tentando reconectar");
+    disconnect(sock);
+  }
+}
+
+#else
 
 int Runtime::connect_once() {
   const std::string path = socket_path();
@@ -594,6 +785,8 @@ void Runtime::ipc_thread_main() {
     disconnect(sock);
   }
 }
+
+#endif  // _WIN32
 
 void Runtime::handle_message(ipc::Message &m) {
   std::lock_guard pl(pending_mu_);

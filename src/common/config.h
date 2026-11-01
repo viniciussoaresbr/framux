@@ -52,7 +52,11 @@ struct Config {
   } overlay;
 
   struct Benchmark {
+#ifdef _WIN32
+    std::string folder = "$XDG_DOCUMENTS_DIR/framux/benchmarks";
+#else
     std::string folder = "~/.local/share/framux/benchmarks";
+#endif
     uint32_t stop_after_s = 0;
     bool log_frametimes = true;
     bool log_fps = true;
@@ -104,8 +108,22 @@ struct Config {
   } audio;
 
   struct Filters {
+#ifdef _WIN32
+    std::vector<std::string> exclude{"steamwebhelper", "steam",   "firefox",        "chrome",  "msedge",
+                                     "msedgewebview2", "explorer", "dwm",           "Discord", "obs64",
+                                     "obs32",          "framux",   "framuxd",       "framux-gui", "EpicGamesLauncher",
+                                     "EpicWebHelper",  "Spotify",  "thunderbird",
+                                     // Programas de desktop que redesenham pela GPU (medidos pelo ETW).
+                                     "WindowsTerminal", "Code", "devenv", "ms-teams", "Teams", "slack",
+                                     "ShellExperienceHost", "StartMenuExperienceHost", "SearchHost",
+                                     "TextInputHost", "ApplicationFrameHost", "SystemSettings", "Widgets",
+                                     "PhoneExperienceHost", "Photos", "Notepad", "WhatsApp", "Telegram",
+                                     "vlc", "mpc-hc64", "mpc-be64", "mpv", "PotPlayerMini64", "Microsoft.Media.Player",
+                                     "Video.UI", "opera", "brave", "vivaldi"};
+#else
     std::vector<std::string> exclude{"steamwebhelper", "firefox",   "chrome", "chromium", "thunderbird",
                                      "Xwayland",       "gamescope", "framux", "framuxd",  "obs"};
+#endif
     std::vector<std::string> include;
   } filters;
 };

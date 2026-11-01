@@ -5,11 +5,13 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QComboBox>
+#ifndef _WIN32
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDBusMessage>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#endif
 #include <QDesktopServices>
 #include <QDir>
 #include <QFormLayout>
@@ -40,13 +42,22 @@
 #include "common/flatpak.h"
 #include "common/video_rate.h"
 #include "gui/theme.h"
+#ifdef _WIN32
+#include <QOperatingSystemVersion>
+#include <QPointer>
+
+#include "common/control_client.h"
+#include "common/win_util.h"
+#endif
 
 namespace framux::gui {
 
 namespace {
 
+#ifndef _WIN32
 constexpr const char *kBus = "io.github.framux.Daemon1";
 constexpr const char *kPath = "/io/github/framux/Daemon1";
+#endif
 constexpr int kPollMs = 1000;
 
 // Cartão com título: a unidade visual de cada grupo de opções.
@@ -95,7 +106,12 @@ QFormLayout *form() {
 }
 
 QString api_label(const QString &api, const QString &engine) {
-  QString s = api == "vulkan" ? "Vulkan" : api.startsWith("gl") ? "OpenGL" : api;
+  QString s = api == "vulkan"    ? "Vulkan"
+              : api == "d3d9"    ? "Direct3D 9"
+              : api == "d3d11"   ? "Direct3D 11"
+              : api == "d3d12"   ? "Direct3D 12"
+              : api.startsWith("gl") ? "OpenGL"
+                                     : api;
   const QString e = engine.toLower();
   if (e.contains("dxvk"))
     s += " (DXVK)";
@@ -190,7 +206,37 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store), audio_devices_(std::
   connect(&poll_timer_, &QTimer::timeout, this, [this] { poll_status(); });
   poll_timer_.start(kPollMs);
   poll_status();
+#ifdef _WIN32
+  notify_thread_ = std::thread([this] { notify_thread_main(); });
+#endif
 }
+
+#ifdef _WIN32
+MainWindow::~MainWindow() {
+  notify_stop_ = true;
+  if (notify_thread_.joinable()) notify_thread_.join();
+}
+
+// O Windows não tem servidor de notificações do daemon: os avisos chegam
+// pelo canal de controle e viram balões da bandeja.
+void MainWindow::notify_thread_main() {
+  ctl::Subscription sub;
+  while (!notify_stop_) {
+    if (!sub.is_open() && !sub.open(500)) {
+      for (int i = 0; i < 20 && !notify_stop_; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      continue;
+    }
+    const auto ev = sub.next(300);
+    if (ev.size() < 3 || ev[0] != "Notify") continue;
+    const QString title = QString::fromStdString(ev[1]), body = QString::fromStdString(ev[2]);
+    const bool error = ev.size() > 3 && ev[3].find("error") != std::string::npos;
+    QMetaObject::invokeMethod(this, [this, title, body, error] {
+      if (tray_active())
+        tray_->showMessage(title, body, error ? QSystemTrayIcon::Warning : QSystemTrayIcon::Information, 4000);
+    });
+  }
+}
+#endif
 
 void MainWindow::select_tab(int index) { tabs_->set_current(index); }
 
@@ -208,7 +254,11 @@ QWidget *MainWindow::build_general() {
 
   QVBoxLayout *b;
   QFrame *act = card("Ativação", page, &b);
+#ifdef _WIN32
+  auto_activate_ = new QCheckBox("Ativar automaticamente nos jogos Vulkan (Steam e lista de jogos)", act);
+#else
   auto_activate_ = new QCheckBox("Ativar automaticamente nos jogos (Steam, Proton e Wine — Vulkan)", act);
+#endif
   auto_activate_->setObjectName("autoActivate");
   auto_hint_ = hint("", act, "warn");
   auto_hint_->hide();
@@ -222,7 +272,11 @@ QWidget *MainWindow::build_general() {
     b->addWidget(flatpak_);
     b->addWidget(flatpak_hint_);
   }
+#ifdef _WIN32
+  b->addWidget(hint("Jogos Vulkan fora do modo automático: use nas opções de inicialização da Steam", act));
+#else
   b->addWidget(hint("Jogos OpenGL nativos e outros fora da Steam: use nas opções de inicialização", act));
+#endif
   auto *cmd_row = new QHBoxLayout;
   run_cmd_ = new QLabel(act);
   run_cmd_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -268,7 +322,11 @@ QWidget *MainWindow::build_general() {
   }
 
   QFrame *start = card("Inicialização", page, &b);
+#ifdef _WIN32
+  open_on_login_ = new QCheckBox("Abrir o Framux ao entrar no Windows", start);
+#else
   open_on_login_ = new QCheckBox("Abrir o Framux ao entrar na sessão", start);
+#endif
   start_minimized_ = new QCheckBox("Iniciar minimizado", start);
   tray_check_ = new QCheckBox("Ícone na bandeja (fechar a janela mantém o Framux rodando)", start);
   tray_hint_ = hint("", start, "warn");
@@ -596,9 +654,15 @@ QWidget *MainWindow::build_recordings() {
   audio_game_->setObjectName("audioGame");
   b->addWidget(audio_game_);
   b->addWidget(
+#ifdef _WIN32
+      hint("Só o áudio do processo do jogo (WASAPI, Windows 10 2004+): músicas, chamadas e avisos de outros "
+           "programas ficam de fora.",
+           audio));
+#else
       hint("Só o áudio do processo do jogo, pelo PipeWire: músicas, chamadas e avisos de outros "
            "programas ficam de fora.",
            audio));
+#endif
   audio_mic_ = new QCheckBox("Gravar o microfone", audio);
   audio_mic_->setObjectName("audioMic");
   b->addWidget(audio_mic_);
@@ -983,6 +1047,28 @@ QString MainWindow::check_hotkey(const std::string &h, const std::string Config:
 void MainWindow::poll_status() {
   if (audio_devices_->revision() != audio_devices_rev_) fill_microphones();
   update_meter();  // a janela pode ter ido para a bandeja ou minimizado
+#ifdef _WIN32
+  // O pedido sai numa thread: a janela nunca espera o daemon.
+  if (polling_.exchange(true)) return;
+  QPointer<MainWindow> self(this);
+  std::thread([self] {
+    const ctl::Reply r = ctl::call({"StatusJson"}, 800);
+    QMetaObject::invokeMethod(qApp, [self, r] {
+      if (!self) return;
+      self->polling_ = false;
+      const bool up = !r.unreachable;
+      if (up != self->daemon_up_) {
+        self->daemon_up_ = up;
+        self->update_environment();
+      }
+      if (!up) {
+        self->set_status("#e5534b", "Framux parado: abra o Framux de novo para voltar a monitorar");
+        return;
+      }
+      if (r.ok) self->apply_status(QByteArray::fromStdString(r.text));
+    });
+  }).detach();
+#else
   QDBusConnection bus = QDBusConnection::sessionBus();
   const bool up = bus.isConnected() && bus.interface()->isServiceRegistered(kBus);
   if (up != daemon_up_) {
@@ -1000,6 +1086,7 @@ void MainWindow::poll_status() {
     if (!r.isError()) apply_status(r.value().toUtf8());
     w->deleteLater();
   });
+#endif
 }
 
 void MainWindow::apply_status(const QByteArray &json) {
@@ -1064,6 +1151,15 @@ void MainWindow::set_status(const QString &dot_color, const QString &text) {
 }
 
 void MainWindow::update_environment() {
+#ifdef _WIN32
+  const QOperatingSystemVersion os = QOperatingSystemVersion::current();
+  env_session_->setText(QString("Sistema: <b>Windows %1</b> · build %2")
+                            .arg(os.microVersion() >= 22000 ? "11" : "10")
+                            .arg(os.microVersion()));
+  const LayerInstall li = installed_layers();
+  env_layer64_->setText(check(li.x86_64, "Camada Vulkan registrada"));
+  env_layer32_->hide();
+#else
   const QString type = qEnvironmentVariable("XDG_SESSION_TYPE");
   const QString desk = qEnvironmentVariable("XDG_CURRENT_DESKTOP").split(':').value(0);
   env_session_->setText(QString("Sessão: <b>%1</b>%2")
@@ -1074,6 +1170,7 @@ void MainWindow::update_environment() {
   const LayerInstall li = installed_layers();
   env_layer64_->setText(check(li.x86_64, "Camada Vulkan 64 bits"));
   env_layer32_->setText(check(li.i686, "Camada Vulkan 32 bits"));
+#endif
   QString hk = "—";
   if (hotkey_backend_ == "x11")
     hk = "globais (X11)";
@@ -1085,10 +1182,17 @@ void MainWindow::update_environment() {
   env_daemon_->setText(check(daemon_up_, daemon_up_ ? "Daemon ativo" : "Daemon parado"));
 
   const bool on = auto_activation_enabled(), relogin = auto_activation_needs_relogin();
+#ifdef _WIN32
+  env_auto_->setText(!on       ? "Modo automático: desligado"
+                     : relogin ? "Modo automático: <span style='color:#e8912d'>reinicie o Steam</span>"
+                               : check(true, "Modo automático ativo"));
+  auto_hint_->setText("Feche o Steam (inclusive na bandeja) e abra de novo para valer nos jogos abertos por ele.");
+#else
   env_auto_->setText(!on       ? "Modo automático: desligado"
                      : relogin ? "Modo automático: <span style='color:#e8912d'>vale após novo login</span>"
                                : check(true, "Modo automático ativo"));
   auto_hint_->setText("Saia e entre de novo na sessão para valer nos jogos abertos pela Steam.");
+#endif
   auto_hint_->setVisible(relogin);
 
   const flatpak::Status fp = flatpak::status();
@@ -1112,12 +1216,24 @@ void MainWindow::update_environment() {
   const QString cmd = launch_command();
   run_cmd_->setToolTip(cmd);
   // O caminho do Flatpak é longo: mostra só o fim; Copiar leva o completo.
+#ifdef _WIN32
+  // O caminho do framux.exe é longo: mostra só o fim; Copiar leva o completo.
+  run_cmd_->setText("<code>" + QString("\"…\\framux.exe\" run %command%").toHtmlEscaped() + "</code>");
+#else
   run_cmd_->setText("<code>" + (fp.enabled ? "…/framux/bin/framux-run %command%" : cmd).toHtmlEscaped() + "</code>");
+#endif
 }
 
 QString MainWindow::launch_command() const {
+#ifdef _WIN32
+  // A Steam do Windows não procura no PATH: caminho completo do framux.exe.
+  QString exe = QString::fromStdString(win::module_dir()) + "/framux.exe";
+  exe.replace('/', '\\');
+  return "\"" + exe + "\" run %command%";
+#else
   return flatpak::status().enabled ? QString::fromStdString(flatpak::run_command())
                                    : QStringLiteral("framux run %command%");
+#endif
 }
 
 // ---------------------------------------------------------------------------

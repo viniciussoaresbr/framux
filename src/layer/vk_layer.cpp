@@ -8,16 +8,21 @@
 
 // Plataformas antes de qualquer cabeçalho Vulkan, para o dispatch table
 // incluir vkCreateXlibSurfaceKHR/vkCreateXcbSurfaceKHR.
+#ifdef _WIN32
+#define VK_USE_PLATFORM_WIN32_KHR
+#include <windows.h>
+#else
 #define VK_USE_PLATFORM_XLIB_KHR
 #define VK_USE_PLATFORM_XCB_KHR
 #include <X11/Xlib.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <xcb/xcb.h>
+#endif
 #include <vulkan/utility/vk_dispatch_table.h>
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan.h>
-#include <xcb/xcb.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -32,8 +37,15 @@
 #include "client/runtime.h"
 #include "common/ipc_proto.h"
 #include "common/log.h"
+#ifdef _WIN32
+#include "common/shm.h"
+#endif
 
+#ifdef _WIN32
+#define FRAMUX_EXPORT extern "C" __declspec(dllexport)
+#else
 #define FRAMUX_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
 
 namespace framux::vk {
 
@@ -400,6 +412,19 @@ void finish_capture(SwapchainData &sc, const PendingCapture &pc) {
   Runtime &rt = Runtime::get();
   const uint32_t bpp = bytes_per_pixel(sc.format);
   const size_t size = size_t(sc.extent.width) * sc.extent.height * bpp;
+#ifdef _WIN32
+  int fd = -1;
+  const bool mapped = read_host_buffer(*sc.dev, sc.cap, [&](const uint8_t *ptr) { fd = shm::from_bytes(ptr, size); });
+  const bool ok = fd != -1;
+  if (!mapped) {
+    rt.send_capture_error(pc.req.request_id, "falha ao mapear a memória da captura");
+    return;
+  }
+  if (!ok) {
+    rt.send_capture_error(pc.req.request_id, "falha ao copiar o quadro");
+    return;
+  }
+#else
   const int fd = memfd_create("framux-frame", MFD_CLOEXEC | MFD_ALLOW_SEALING);
   bool ok = fd >= 0 && ftruncate(fd, off_t(size)) == 0;
   const bool mapped = read_host_buffer(*sc.dev, sc.cap, [&](const uint8_t *ptr) {
@@ -423,6 +448,7 @@ void finish_capture(SwapchainData &sc, const PendingCapture &pc) {
     return;
   }
   fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
+#endif
   ipc::FrameImage img{};
   img.request_id = pc.req.request_id;
   img.present_ns = pc.present_ns;
@@ -686,6 +712,19 @@ VKAPI_ATTR void VKAPI_CALL DestroyInstance(VkInstance instance, const VkAllocati
   destroy(instance, alloc);
 }
 
+#ifdef _WIN32
+// A janela serve só para o foco; o Windows garante HWNDs de 32 bits.
+VKAPI_ATTR VkResult VKAPI_CALL CreateWin32SurfaceKHR(VkInstance instance, const VkWin32SurfaceCreateInfoKHR *ci,
+                                                     const VkAllocationCallbacks *alloc, VkSurfaceKHR *out) {
+  InstanceData *d = get_instance(instance);
+  VkResult r = d->vtable.CreateWin32SurfaceKHR(instance, ci, alloc, out);
+  if (r == VK_SUCCESS) {
+    std::lock_guard lk(g_mu);
+    g_surface_window[*out] = uint32_t(uintptr_t(ci->hwnd));
+  }
+  return r;
+}
+#else
 VKAPI_ATTR VkResult VKAPI_CALL CreateXlibSurfaceKHR(VkInstance instance, const VkXlibSurfaceCreateInfoKHR *ci,
                                                     const VkAllocationCallbacks *alloc, VkSurfaceKHR *out) {
   InstanceData *d = get_instance(instance);
@@ -707,6 +746,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateXcbSurfaceKHR(VkInstance instance, const Vk
   }
   return r;
 }
+#endif
 
 VKAPI_ATTR void VKAPI_CALL DestroySurfaceKHR(VkInstance instance, VkSurfaceKHR surface,
                                              const VkAllocationCallbacks *alloc) {
@@ -996,11 +1036,14 @@ VKAPI_ATTR VkResult VKAPI_CALL QueuePresentKHR(VkQueue queue, const VkPresentInf
           vin = {0, image, present_ns, w, h, w * 4, uint32_t(sc->format), 0};
         }
         const VkDeviceSize size = use_yuv ? VkDeviceSize(vin.stride) * vin.height * 3 / 2 : VkDeviceSize(w) * h * 4;
+        bool any_free = false;
         for (uint32_t k = 0; k < kVideoStaging; ++k)
           if (!sc->video_busy[k]) {
+            any_free = true;
             if (ensure_buffer(*d, sc->video[k], size)) video_staging = int(k);
             break;
           }
+        if (!any_free) rt.add_video_skip();
       }
     }
     const bool draw = res.draw && sc->can_draw;
@@ -1087,8 +1130,12 @@ PFN_vkVoidFunction instance_hook(const char *name) {
   HOOK(CreateInstance);
   HOOK(DestroyInstance);
   HOOK(CreateDevice);
+#ifdef _WIN32
+  HOOK(CreateWin32SurfaceKHR);
+#else
   HOOK(CreateXlibSurfaceKHR);
   HOOK(CreateXcbSurfaceKHR);
+#endif
   HOOK(DestroySurfaceKHR);
 #undef HOOK
   return nullptr;
@@ -1102,7 +1149,18 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL GetInstanceProcAddr(VkInstance instance
   if (!std::strcmp(name, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)GetInstanceProcAddr;
   if (!std::strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)GetDeviceProcAddr;
   if (!std::strcmp(name, "vkCreateInstance")) return (PFN_vkVoidFunction)CreateInstance;
-  if (!instance) return nullptr;
+  if (!instance) {
+    // Algumas camadas acima desta (ex.: a do RivaTuner/RTSS no Windows)
+    // pedem vkCreateDevice com instância nula. O CreateDevice acha a
+    // instância pelo dispositivo físico; o resto vai para a próxima camada.
+    if (!std::strcmp(name, "vkCreateDevice")) return (PFN_vkVoidFunction)CreateDevice;
+    PFN_vkGetInstanceProcAddr next_gipa = nullptr;
+    {
+      std::lock_guard lk(g_mu);
+      if (!g_instances.empty()) next_gipa = g_instances.begin()->second->next_gipa;
+    }
+    return next_gipa ? next_gipa(VK_NULL_HANDLE, name) : nullptr;
+  }
   InstanceData *d = get_instance(instance);
   if (!d) return nullptr;
   PFN_vkVoidFunction next = d->next_gipa(instance, name);

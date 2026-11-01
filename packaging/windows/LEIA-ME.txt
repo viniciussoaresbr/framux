@@ -1,0 +1,41 @@
+Framux para Windows
+===================
+
+Contador de FPS, benchmark, screenshots e gravação de jogos.
+
+Abrir: framux-gui.exe (ou o atalho "Framux" no menu Iniciar, se instalado).
+A janela inicia o daemon (framuxd.exe) e fica na bandeja.
+
+Atalhos (com o jogo em foco): F9 grava, F10 captura, F11 benchmark,
+F12 mostra/oculta o contador, Shift+F12 troca o canto.
+
+Como cada tipo de jogo é atendido
+---------------------------------
+Vulkan: a camada do Framux entra no jogo pelo loader do Vulkan.
+  Contador dentro do jogo, inclusive em tela cheia exclusiva.
+  Ative com "Ativar automaticamente" (jogos da Steam) ou use nas opções de
+  inicialização da Steam o comando mostrado na aba Geral:
+    "C:\...\framux.exe" run %command%
+
+Direct3D 9/10/11/12 e OpenGL: medidos e capturados de fora do jogo, sem
+  injetar nada no processo dele (compatível com anti-cheat):
+  - FPS e benchmark pelos eventos de desempenho do Windows (ETW);
+  - screenshot e gravação pelo Windows Graphics Capture;
+  - contador numa janela sobreposta (aparece em janela e janela sem bordas,
+    não em tela cheia exclusiva; o vídeo sai sem ele).
+  Requer o grupo "Usuários do log de desempenho": o instalador adiciona você;
+  vale depois de sair e entrar de novo no Windows. Na versão portátil, rode
+  uma vez num PowerShell como administrador:
+    Add-LocalGroupMember -SID S-1-5-32-559 -Member "$env:USERDOMAIN\$env:USERNAME"
+
+Requisitos: Windows 10 2004 ou mais novo (64 bits). Gravação pela placa de
+vídeo com NVIDIA (NVENC), AMD (AMF) ou Intel (QSV); sem elas, pelo processador.
+
+Arquivos
+--------
+Config:       %APPDATA%\framux\config.toml
+Log:          %LOCALAPPDATA%\framux\framuxd.log
+Screenshots:  Imagens\framux     Vídeos: Vídeos\framux
+Benchmarks:   Documentos\framux\benchmarks
+
+Diagnóstico: framux.exe doctor

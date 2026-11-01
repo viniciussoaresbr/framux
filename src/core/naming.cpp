@@ -7,6 +7,13 @@
 #include <cstdio>
 #include <cstring>
 
+#ifdef _WIN32
+// Sem symlinks a seguir nem exec: o que importa no Windows é o modo binário
+// (sem ele, o CRT converte as quebras de linha) e o handle não ser herdado.
+#define O_NOFOLLOW 0
+#define O_CLOEXEC (O_BINARY | O_NOINHERIT)
+#endif
+
 namespace framux {
 
 std::string file_timestamp(std::time_t t, int centis) {

@@ -1,5 +1,8 @@
 #include "daemon/daemon.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -14,6 +17,7 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include <cerrno>
 #include <cinttypes>
@@ -28,7 +32,14 @@
 #include "common/paths.h"
 #include "core/image.h"
 #include "core/naming.h"
+#ifdef _WIN32
+#include <thread>
+
+#include "common/shm.h"
+#include "common/win_util.h"
+#else
 #include "daemon/x11_hotkeys.h"
+#endif
 #include "framux/stats.h"
 #include "framux_build_config.h"
 
@@ -43,6 +54,7 @@ constexpr uint64_t kReloadDebounceNs = 200 * kNsPerMs;
 enum Action { kActBenchmark = 0, kActOverlay, kActScreenshot, kActVideo, kActLoopSave, kActOverlayCorner, kActCount };
 
 // Tags no epoll: fds fixos com valores especiais, clientes pelo próprio fd.
+#ifndef _WIN32
 enum : uint64_t {
   kTagListen = 1ull << 40,
   kTagSignal,
@@ -59,6 +71,7 @@ void ep_add(int ep, int fd, uint64_t tag, uint32_t events = EPOLLIN) {
   ev.data.u64 = tag;
   epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
 }
+#endif
 
 std::string json_str(const std::string &s) {
   std::string o = "\"";
@@ -82,17 +95,34 @@ ActionResult no_session() {
 }
 
 // CPU (usuário + sistema) de todas as threads do daemon, em ns.
+#ifdef _WIN32
+uint64_t process_cpu_ns() {
+  FILETIME created, exited, kernel, user;
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+  auto ns = [](const FILETIME &f) { return ((uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime) * 100ull; };
+  return ns(kernel) + ns(user);
+}
+
+int cpu_count() { return std::max(1, int(std::thread::hardware_concurrency())); }
+#else
+int cpu_count() { return int(std::max(1L, sysconf(_SC_NPROCESSORS_ONLN))); }
+
 uint64_t process_cpu_ns() {
   rusage ru{};
   getrusage(RUSAGE_SELF, &ru);
   auto ns = [](const timeval &t) { return uint64_t(t.tv_sec) * 1'000'000'000ull + uint64_t(t.tv_usec) * 1000ull; };
   return ns(ru.ru_utime) + ns(ru.ru_stime);
 }
+#endif
 
 }  // namespace
 
 VideoMap::~VideoMap() {
+#ifdef _WIN32
+  shm::unmap(ring);
+#else
   if (ring) munmap(ring, size);
+#endif
 }
 
 uint32_t Session::primary_swapchain() const {
@@ -115,6 +145,7 @@ const SwapStat *Session::primary() const {
 
 Daemon::Daemon() = default;
 
+#ifndef _WIN32
 Daemon::~Daemon() {
   for (auto &[id, s] : sessions_) {
     if (s->ring) munmap(s->ring, s->ring_size);
@@ -125,9 +156,12 @@ Daemon::~Daemon() {
   for (int fd : {epfd_, listen_fd_, signal_fd_, timer_fd_, inotify_fd_})
     if (fd >= 0) close(fd);
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // Inicialização
+
+#ifndef _WIN32
 
 bool Daemon::setup_socket(int listen_fd) {
   const std::string dir = runtime_dir();
@@ -178,7 +212,15 @@ bool Daemon::setup_socket(int listen_fd) {
   return true;
 }
 
+#endif  // !_WIN32
+
 void Daemon::resolve_hotkey_backend() {
+#ifdef _WIN32
+  // Teclas lidas dentro do jogo (camada Vulkan); jogos medidos de fora usam
+  // os atalhos globais do daemon.
+  backend_ = "ingame";
+  return;
+#endif
   const std::string want = global_cfg_.hotkeys.backend;
   const char *session = std::getenv("XDG_SESSION_TYPE");
   const bool x11_session = session && !std::strcmp(session, "x11") && std::getenv("DISPLAY");
@@ -187,6 +229,7 @@ void Daemon::resolve_hotkey_backend() {
   if (want == "portal" || want == "evdev")
     FRAMUX_LOG("backend de hotkeys \"%s\" ainda não implementado; usando leitura in-game", want.c_str());
 
+#ifndef _WIN32
   if (resolved == "x11" && !x11_) {
     x11_ = X11Hotkeys::open([this](uint32_t ks, uint32_t mods, bool pressed) { on_key(nullptr, ks, mods, pressed); });
     if (x11_)
@@ -201,6 +244,7 @@ void Daemon::resolve_hotkey_backend() {
     x11_.reset();
   }
   if (x11_) x11_->set_bindings(bindings(global_cfg_));
+#endif
   backend_ = resolved;
 }
 
@@ -212,6 +256,7 @@ std::vector<Hotkey> Daemon::bindings(const Config &cfg) const {
   return out;
 }
 
+#ifndef _WIN32
 int Daemon::run(int listen_fd) {
   std::vector<std::string> warnings;
   global_cfg_ = load_config("", &warnings);
@@ -381,7 +426,6 @@ void Daemon::on_client(int fd, uint32_t events) {
   auto it = fd_session_.find(fd);
   if (it == fd_session_.end()) return;
   const uint64_t id = it->second;
-  Session &s = *sessions_[id];
   for (int i = 0; i < 64; ++i) {
     ipc::Message m;
     const auto r = ipc::recv_msg(fd, m, MSG_DONTWAIT);
@@ -390,25 +434,34 @@ void Daemon::on_client(int fd, uint32_t events) {
       close_session(id, r == ipc::RecvResult::Closed ? "desconectou" : "mensagem inválida");
       return;
     }
-    if (!s.hello_done) {
-      if (m.type != ipc::MsgType::Hello) {
-        close_session(id, "não enviou HELLO");
-        return;
-      }
-      handle_hello(s, m);
-      if (!s.hello_done) {
-        close_session(id, "HELLO recusado");
-        return;
-      }
-      continue;
-    }
-    if (m.type == ipc::MsgType::Bye) {
-      close_session(id, "BYE");
-      return;
-    }
-    handle_message(s, m);
+    if (!dispatch(id, m)) return;
   }
   if (events & (EPOLLHUP | EPOLLERR)) close_session(id, "desconectou");
+}
+#endif  // !_WIN32
+
+bool Daemon::dispatch(uint64_t id, ipc::Message &m) {
+  auto it = sessions_.find(id);
+  if (it == sessions_.end()) return false;
+  Session &s = *it->second;
+  if (!s.hello_done) {
+    if (m.type != ipc::MsgType::Hello) {
+      close_session(id, "não enviou HELLO");
+      return false;
+    }
+    handle_hello(s, m);
+    if (!s.hello_done) {
+      close_session(id, "HELLO recusado");
+      return false;
+    }
+    return true;
+  }
+  if (m.type == ipc::MsgType::Bye) {
+    close_session(id, "BYE");
+    return false;
+  }
+  handle_message(s, m);
+  return true;
 }
 
 void Daemon::close_session(uint64_t id, const char *why) {
@@ -420,10 +473,18 @@ void Daemon::close_session(uint64_t id, const char *why) {
   if (s.bench) bench_stop(s);
   if (s.rec) video_stop(s, false);  // o que já chegou vira um arquivo válido
   if (s.hello_done) FRAMUX_LOG("sessão %" PRIu64 " (%s, pid %d) encerrada: %s", id, s.game.c_str(), s.hello.pid, why);
+#ifdef _WIN32
+  if (!s.external) {
+    ipc::pipe_close(s.fd);  // a thread de leitura acorda e termina
+    fd_session_.erase(s.fd);
+    shm::unmap(s.ring);
+  }
+#else
   epoll_ctl(epfd_, EPOLL_CTL_DEL, s.fd, nullptr);
   close(s.fd);
   fd_session_.erase(s.fd);
   if (s.ring) munmap(s.ring, s.ring_size);
+#endif
   for (auto sh = shots_.begin(); sh != shots_.end();) {
     if (sh->second.session == id) {
       if (dbus_ && sh->second.via_dbus) dbus_->emit_error(sh->first, "o jogo encerrou antes da captura");
@@ -460,8 +521,17 @@ void Daemon::handle_hello(Session &s, const ipc::Message &m) {
   for (const auto &w : warnings) FRAMUX_LOG("config: %s", w.c_str());
   s.corner = s.cfg.overlay.corner;
 
-  const int ring_fd = memfd_create("framux-ring", MFD_CLOEXEC | MFD_ALLOW_SEALING);
   const size_t bytes = ring_bytes(kRingDefaultCapacity);
+#ifdef _WIN32
+  const int ring_fd = shm::create(bytes);
+  void *map = shm::map(ring_fd, nullptr, true);
+  if (!map) {
+    shm::close(ring_fd);
+    FRAMUX_LOG("sem memória para o ring da sessão");
+    return;
+  }
+#else
+  const int ring_fd = memfd_create("framux-ring", MFD_CLOEXEC | MFD_ALLOW_SEALING);
   void *map = MAP_FAILED;
   if (ring_fd >= 0 && ftruncate(ring_fd, off_t(bytes)) == 0)
     map = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd, 0);
@@ -471,6 +541,7 @@ void Daemon::handle_hello(Session &s, const ipc::Message &m) {
     return;
   }
   fcntl(ring_fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL);
+#endif
   s.ring = static_cast<RingHeader *>(map);
   s.ring_size = bytes;
   ring_init(s.ring, kRingDefaultCapacity);
@@ -478,7 +549,11 @@ void Daemon::handle_hello(Session &s, const ipc::Message &m) {
   const std::string toml = session_config_toml(s);
   ipc::Welcome w{ipc::kProtoVersion, uint32_t(toml.size()), s.id};
   const bool ok = ipc::send_msg(s.fd, ipc::MsgType::Welcome, &w, sizeof w, toml.data(), toml.size(), &ring_fd, 1);
+#ifdef _WIN32
+  shm::close(ring_fd);  // o jogo tem a cópia dele; a view daqui mantém a seção
+#else
   close(ring_fd);
+#endif
   if (!ok) return;
   s.hello_done = true;
   FRAMUX_LOG("sessão %" PRIu64 ": %s (pid %d, %s, %u bits%s%s%s)", s.id, s.game.c_str(), h->pid,
@@ -522,6 +597,7 @@ void Daemon::handle_message(Session &s, ipc::Message &m) {
         s.video_cost.cpu_ns += c->cpu_ns;
         s.video_cost.max_ns = std::max(s.video_cost.max_ns, c->max_ns);
         s.video_cost.frames += c->frames;
+        s.video_cost.gpu_skipped += c->gpu_skipped;
       }
       break;
     case ipc::MsgType::Error:
@@ -552,19 +628,30 @@ void Daemon::handle_frame_image(Session &s, ipc::Message &m) {
   // Validação do fd recebido (§C.11.2): arquivo regular com o tamanho
   // anunciado e dimensões coerentes com o formato.
   const int fd = m.take_fd(0);
-  struct stat st;
   const uint32_t bpp = vk_format_bpp(img->vk_format);
   const uint64_t need = uint64_t(img->offset) + img->size;
   std::string err;
+#ifdef _WIN32
+  size_t mapped_size = 0;
+  void *view = shm::map(fd, &mapped_size, false);
+  shm::close(fd);
+  if (!view || mapped_size < need) err = "seção de imagem inválida";
+#else
+  struct stat st;
   if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || uint64_t(st.st_size) < need)
     err = "fd de imagem inválido";
+#endif
   else if (!bpp)
     err = std::string("formato de swapchain não suportado: ") + std::to_string(img->vk_format);
   else if (img->width == 0 || img->height == 0 || img->width > 16384 || img->height > 16384 ||
            img->stride < uint64_t(img->width) * bpp || img->size < uint64_t(img->stride) * img->height)
     err = "dimensões de imagem inválidas";
   if (!err.empty()) {
+#ifdef _WIN32
+    shm::unmap(view);
+#else
     close(fd);
+#endif
     FRAMUX_LOG("screenshot de %s: %s", s.game.c_str(), err.c_str());
     if (dbus_ && shot.via_dbus) dbus_->emit_error(img->request_id, err);
     return;
@@ -572,11 +659,18 @@ void Daemon::handle_frame_image(Session &s, ipc::Message &m) {
 
   const ipc::FrameImage info = *img;
   const uint64_t req = img->request_id;
+#ifdef _WIN32
+  worker_.post([this, view, info, shot, req] {
+    std::string error, path;
+    void *map = view;
+    if (!map) {
+#else
   worker_.post([this, fd, info, shot, req] {
     std::string error, path;
     void *map = mmap(nullptr, size_t(info.offset + info.size), PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
     if (map == MAP_FAILED) {
+#endif
       error = "mmap da imagem falhou";
     } else {
       RawImage raw;
@@ -591,7 +685,11 @@ void Daemon::handle_frame_image(Session &s, ipc::Message &m) {
       std::vector<uint8_t> bytes;
       const bool ok =
           convert_image(raw, rgb, &error) && encode_image(rgb, shot.cfg.format, shot.cfg.jpeg_quality, bytes, &error);
+#ifdef _WIN32
+      shm::unmap(map);
+#else
       munmap(map, size_t(info.offset + info.size));
+#endif
       const std::string folder = expand_path(shot.cfg.folder);
       if (ok && make_dirs(folder, &error)) {
         const std::string stem = shot.game + " " + file_timestamp(shot.wall, shot.centis);
@@ -619,6 +717,19 @@ void Daemon::handle_video_buffer(Session &s, ipc::Message &m) {
   const auto *vb = m.as<ipc::VideoBuffer>();
   if (!vb || m.nfds < 1) return;
   const int fd = m.take_fd(0);
+#ifdef _WIN32
+  size_t size = 0;
+  void *map = shm::map(fd, &size, true);
+  shm::close(fd);
+  if (map && (size <= kVideoRingDataOffset || size > (size_t(1) << 32))) {
+    shm::unmap(map);
+    map = nullptr;
+  }
+  if (!map) {
+    FRAMUX_LOG("%s: buffer de vídeo inválido", s.game.c_str());
+    return;
+  }
+#else
   struct stat st;
   void *map = MAP_FAILED;
   // Validação (§C.11.2): memfd regular, cabeçalho coerente com o tamanho.
@@ -630,9 +741,11 @@ void Daemon::handle_video_buffer(Session &s, ipc::Message &m) {
     FRAMUX_LOG("%s: buffer de vídeo inválido", s.game.c_str());
     return;
   }
+  const size_t size = size_t(st.st_size);
+#endif
   auto vm = std::make_shared<VideoMap>();
   vm->ring = static_cast<VideoRingHeader *>(map);
-  vm->size = size_t(st.st_size);
+  vm->size = size;
   vm->generation = vb->generation;
   const VideoRingHeader &h = *vm->ring;
   if (h.magic != kVideoRingMagic || h.slot_count != kVideoSlots || h.slot_bytes == 0 ||
@@ -647,7 +760,16 @@ void Daemon::handle_video_frame(Session &s, const ipc::Message &m) {
   const auto *vf = m.as<ipc::VideoFrame>();
   std::shared_ptr<VideoMap> vm = s.video_map;
   if (!vf || !vm || vf->generation != vm->generation || vf->slot >= kVideoSlots) return;
-  auto release = [vm, slot = vf->slot] { vm->ring->state[slot].store(kSlotFree, std::memory_order_release); };
+  const uint64_t arrived = now_ns();
+  auto release = [vm, slot = vf->slot, diag = s.video_diag, arrived] {
+    vm->ring->state[slot].store(kSlotFree, std::memory_order_release);
+    if (!diag) return;
+    const uint64_t held = now_ns() - arrived;
+    diag->hold_sum += held;
+    for (uint64_t m = diag->hold_max; held > m && !diag->hold_max.compare_exchange_weak(m, held);) {
+    }
+    ++diag->released;
+  };
   const bool nv12 = vf->vk_format == ipc::kVkFormatNv12;
   const uint64_t need = uint64_t(vf->stride) * vf->height * (nv12 ? 3 : 2) / 2;
   if (vf->width == 0 || vf->height == 0 || vf->width > 16384 || vf->height > 16384 ||
@@ -662,6 +784,13 @@ void Daemon::handle_video_frame(Session &s, const ipc::Message &m) {
     return;
   }
   if (vf->dropped) s.rec->add_layer_drops(vf->dropped);
+  if (auto &d = s.video_diag) {
+    ++d->arrived;
+    d->ring_drops += vf->dropped;
+    const uint64_t lat = arrived > vf->present_ns ? arrived - vf->present_ns : 0;
+    d->lat_sum += lat;
+    if (lat > d->lat_max) d->lat_max = lat;
+  }
   s.rec->push_video(video_slot(vm->ring, vf->slot), vf->width, vf->height, vf->stride, vf->vk_format,
                     vf->flags & ipc::kImgFlipY, vf->flags & ipc::kImgHalved, vf->present_ns, std::move(release));
 }
@@ -791,11 +920,23 @@ void Daemon::update_stats_export() {
 void Daemon::send_indicators(Session &s, uint32_t event_flags, float bench_result) {
   const uint32_t state = (s.bench ? uint32_t(ipc::kIndBenchmark) : 0u) | (s.rec ? uint32_t(ipc::kIndRecording) : 0u);
   ipc::SetIndicators ind{now_ns(), event_flags | state, bench_result};
+#ifdef _WIN32
+  if (s.external) {
+    if (s.ext_overlay) s.ext_overlay->on_indicators(ind.flags, bench_result, ind.issued_ns);
+    return;
+  }
+#endif
   ipc::send_struct(s.fd, ipc::MsgType::SetIndicators, ind, MSG_DONTWAIT);
 }
 
 void Daemon::send_overlay(Session &s) {
   ipc::SetOverlay o{now_ns(), uint32_t(s.corner)};
+#ifdef _WIN32
+  if (s.external) {
+    if (s.ext_overlay) s.ext_overlay->set_corner(s.corner);
+    return;
+  }
+#endif
   ipc::send_struct(s.fd, ipc::MsgType::SetOverlay, o, MSG_DONTWAIT);
 }
 
@@ -946,6 +1087,15 @@ ActionResult Daemon::request_shot(Session *s, std::optional<bool> include_overla
   p.cfg = s->cfg.screenshot;
   p.via_dbus = via_dbus;
   shots_[id] = p;
+#ifdef _WIN32
+  if (s->external) {
+    ext_shot(*s, id);
+    ActionResult r;
+    r.request_id = id;
+    r.message = "captura solicitada";
+    return r;
+  }
+#endif
   ipc::CaptureFrame c{p.issued_ns, id, include_overlay.value_or(s->cfg.screenshot.include_overlay) ? 1u : 0u, 0};
   if (!ipc::send_struct(s->fd, ipc::MsgType::CaptureFrame, c, MSG_DONTWAIT)) {
     shots_.erase(id);
@@ -1029,6 +1179,7 @@ ActionResult Daemon::video_start(Session &s) {
   s.presents.clear();
   s.rec_cpu_start_ns = process_cpu_ns();
   s.video_cost = {};
+  s.video_diag = std::make_shared<Session::VideoDiag>();
   std::weak_ptr<Recorder> weak = s.rec;
   if (a.game) {
     s.audio = GameAudio::start(
@@ -1048,6 +1199,20 @@ ActionResult Daemon::video_start(Session &s) {
         &err);
     if (!s.mic) FRAMUX_LOG("gravação sem microfone: %s", err.c_str());
   }
+#ifdef _WIN32
+  if (s.external) {
+    std::string cerr;
+    if (!ext_video_start(s, &cerr)) {
+      FRAMUX_LOG("%s: captura da janela falhou: %s", s.game.c_str(), cerr.c_str());
+      video_stop(s, false);
+      return {false, "io.github.framux.Error.Failed", "não consegui capturar a janela do jogo: " + cerr};
+    }
+    send_indicators(s, 0);
+    update_active();
+    FRAMUX_LOG("%s: gravação iniciada → %s", s.game.c_str(), path.c_str());
+    return {true, {}, path};
+  }
+#endif
   // A camada converte para NV12 (e reduz) na GPU, a não ser no sem perda,
   // que precisa do RGB. Camadas antigas ignoram e mandam RGB inteiro.
   const bool rgb = v.quality == "lossless" || v.encoder == "utvideo";
@@ -1066,7 +1231,7 @@ ActionResult Daemon::video_start(Session &s) {
 std::string Daemon::recording_cost(Session &s) {
   const uint64_t wall = now_ns() - s.rec_start_ns;
   const double cores = wall ? double(process_cpu_ns() - s.rec_cpu_start_ns) / double(wall) : 0;
-  const long ncpu = std::max(1L, sysconf(_SC_NPROCESSORS_ONLN));
+  const long ncpu = cpu_count();
   const BenchStats during = compute_stats({s.presents.begin(), s.presents.end()});
   auto fps = [](const BenchStats &b, char *out, size_t n) {
     if (b.frames < 2)
@@ -1081,16 +1246,36 @@ std::string Daemon::recording_cost(Session &s) {
   if (c.frames)
     std::snprintf(copy, sizeof copy, "%.2f ms por quadro gravado (pior %.1f ms)",
                   double(c.cpu_ns) / double(c.frames) / 1e6, double(c.max_ns) / 1e6);
+#ifdef _WIN32
+  else if (s.external)
+    std::snprintf(copy, sizeof copy, "nenhuma (capturado de fora do jogo)");
+#endif
   else
     std::snprintf(copy, sizeof copy, "sem dados (camada anterior à 0.4.2)");
   std::snprintf(out, sizeof out,
                 "jogo %s antes, %s gravando; cópia na thread do jogo %s; framuxd %.2f núcleos (%.0f%% da CPU)", before,
                 now, copy, cores, 100.0 * cores / double(ncpu));
-  return out;
+  std::string text = out;
+  // Por onde os quadros da camada passaram (e onde se perderam).
+  if (const auto &d = s.video_diag; d && d->arrived) {
+    const double n = double(d->arrived), rel = double(std::max<uint64_t>(d->released, 1));
+    char diag[384];
+    std::snprintf(diag, sizeof diag,
+                  "; quadros: %" PRIu64 " chegaram ao framuxd, %u ficaram na camada sem buffer livre (GPU atrasada), %" PRIu64
+                  " com os slots compartilhados cheios (framuxd atrasado); entrega %.1f ms (pior %.0f ms); slot preso "
+                  "no framuxd %.1f ms (pior %.0f ms)",
+                  d->arrived.load(), c.gpu_skipped, d->ring_drops.load(), double(d->lat_sum) / n / 1e6,
+                  double(d->lat_max) / 1e6, double(d->hold_sum) / rel / 1e6, double(d->hold_max) / 1e6);
+    text += diag;
+  }
+  return text;
 }
 
 void Daemon::video_stop(Session &s, bool tell_layer) {
   if (!s.rec) return;
+#ifdef _WIN32
+  s.ext_capture.reset();  // para de entregar quadros antes de finalizar
+#endif
   if (tell_layer) ipc::send_msg(s.fd, ipc::MsgType::VideoStop, nullptr, 0, nullptr, 0, nullptr, 0, MSG_DONTWAIT);
   s.audio.reset();  // para de alimentar o Recorder antes de finalizar
   s.mic.reset();
@@ -1129,6 +1314,32 @@ void Daemon::video_stop(Session &s, bool tell_layer) {
 void Daemon::start_encoder_probe() {
   worker_.post([this] {
     EncoderProbe probe;
+#ifdef _WIN32
+    std::string out;
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{sizeof si};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + win::widen(win::module_path()) + L"\" --probe-encoders";
+    const bool started =
+        CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    char buf[1024];
+    DWORD n = 0;
+    while (started && ReadFile(rd, buf, sizeof buf, &n, nullptr) && n > 0) out.append(buf, n);
+    CloseHandle(rd);
+    if (started) {
+      WaitForSingleObject(pi.hProcess, 30000);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+    }
+#else
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC) != 0) return;
     posix_spawn_file_actions_t fa;
@@ -1147,6 +1358,10 @@ void Daemon::start_encoder_probe() {
     while (r == 0 && (n = read(pipefd[0], buf, sizeof buf)) > 0) out.append(buf, size_t(n));
     close(pipefd[0]);
     if (r == 0) waitpid(pid, nullptr, 0);
+#endif
+#ifdef _WIN32
+    std::erase(out, '\r');  // stdout do filho em modo texto (CRLF)
+#endif
     std::istringstream in(out);
     std::string line;
     while (std::getline(in, line)) {
@@ -1177,6 +1392,9 @@ void Daemon::reload_config() {
     if (!s->hello_done) continue;
     const ipc::Corner old_default = s->cfg.overlay.corner;
     s->cfg = load_config(s->config_name, nullptr);
+#ifdef _WIN32
+    if (s->ext_overlay) s->ext_overlay->set_config(s->cfg.overlay);
+#endif
     if (s->rec) {  // volumes mexidos na janela valem na gravação em andamento
       s->rec->set_volume(AudioSource::Game, float(s->cfg.audio.game_volume) / 100.0f);
       s->rec->set_volume(AudioSource::Mic, float(s->cfg.audio.microphone_volume) / 100.0f);

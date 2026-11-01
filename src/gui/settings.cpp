@@ -10,6 +10,10 @@
 
 #include "common/paths.h"
 #include "framux_build_config.h"
+#ifdef _WIN32
+#include "common/control_client.h"
+#include "common/win_setup.h"
+#endif
 
 namespace framux::gui {
 
@@ -17,6 +21,7 @@ namespace {
 
 constexpr int kSaveDelayMs = 300;
 
+#ifndef _WIN32
 QString env_d_path() { return QString::fromStdString(home_dir()) + "/.config/environment.d/90-framux.conf"; }
 
 QString autostart_path() {
@@ -24,6 +29,8 @@ QString autostart_path() {
   const QString base = xdg && *xdg ? QString(xdg) : QString::fromStdString(home_dir()) + "/.config";
   return base + "/autostart/io.github.framux.desktop";
 }
+
+#endif
 
 bool write_file(const QString &path, const QByteArray &data, QString *err) {
   QDir().mkpath(QFileInfo(path).absolutePath());
@@ -35,14 +42,16 @@ bool write_file(const QString &path, const QByteArray &data, QString *err) {
   return true;
 }
 
-bool remove_file(const QString &path, QString *err) {
+[[maybe_unused]] bool remove_file(const QString &path, QString *err) {
   QFile f(path);
   if (!f.exists() || f.remove()) return true;
   if (err) *err = f.errorString();
   return false;
 }
 
+#ifndef _WIN32
 void systemctl(const QStringList &args) { QProcess::startDetached("systemctl", QStringList{"--user"} + args); }
+#endif
 
 }  // namespace
 
@@ -93,6 +102,54 @@ void ConfigStore::reload_if_external() {
   if (external_) external_();
 }
 
+#ifdef _WIN32
+// No Windows: variáveis do usuário no registro (o environment.d do Linux),
+// camada registrada em HKCU e o framuxd iniciado direto, sem systemd.
+bool auto_activation_enabled() { return win::auto_mode_enabled(); }
+
+bool set_auto_activation(bool on, QString *err) {
+  std::string e;
+  if (!win::set_auto_mode(on, &e)) {
+    if (err) *err = QString::fromStdString(e);
+    return false;
+  }
+  return true;
+}
+
+bool auto_activation_needs_relogin() { return win::auto_mode_needs_restart(); }
+
+bool set_open_on_login(bool on, QString *err) {
+  std::string e;
+  if (!win::set_open_on_login(on, &e)) {
+    if (err) *err = QString::fromStdString(e);
+    return false;
+  }
+  return true;
+}
+
+void start_daemon() {
+  QFile::remove(QString::fromStdString(stopped_path()));
+  // Pelo instalador a camada já está em HKLM; na versão portátil, a janela
+  // registra em HKCU (vale para jogos abertos depois). Nunca nas duas: o
+  // loader veria a camada duplicada.
+  if (!win::layer_registered()) win::set_layer_registered(true, nullptr);
+  if (!ctl::call({"Status"}, 1000).unreachable) return;
+  win::spawn_daemon();
+}
+
+void stop_daemon() {
+  // Sem a marca, a camada carregada pelo modo automático seguiria
+  // desenhando o contador sozinha (modo sem daemon).
+  if (const std::string p = stopped_path(); !p.empty()) write_file(QString::fromStdString(p), {}, nullptr);
+  ctl::call({"Quit"}, 3000);
+}
+
+LayerInstall installed_layers() {
+  LayerInstall li;
+  li.x86_64 = win::layer_registered();
+  return li;
+}
+#else
 bool auto_activation_enabled() { return QFile::exists(env_d_path()); }
 
 bool set_auto_activation(bool on, QString *err) {
@@ -138,6 +195,9 @@ void stop_daemon() {
   systemctl({"stop", "framuxd.socket", "framuxd.service"});
 }
 
+#endif  // _WIN32
+
+#ifndef _WIN32
 LayerInstall installed_layers() {
   QStringList dirs;
   const char *xdg = std::getenv("XDG_DATA_HOME");
@@ -151,6 +211,7 @@ LayerInstall installed_layers() {
   }
   return li;
 }
+#endif
 
 QString expanded_folder(const std::string &folder) { return QString::fromStdString(expand_path(folder)); }
 

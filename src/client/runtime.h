@@ -27,7 +27,13 @@
 
 namespace framux::client {
 
+#ifdef _WIN32
+class WinInput;
+using InputBackend = WinInput;  // GetAsyncKeyState + janela em primeiro plano
+#else
 class X11Input;
+using InputBackend = X11Input;
+#endif
 
 struct CaptureRequest {
   uint64_t request_id = 0;
@@ -82,6 +88,9 @@ class Runtime {
   // Tempo que a camada/shim gastou para entregar um quadro ao video_write
   // (mapear a cópia da GPU + copiar para o slot); vai ao daemon em lotes.
   void add_video_cost(uint64_t ns);
+  // Quadro da gravação que ficou de fora: a cópia dos anteriores ainda
+  // não terminou na GPU e não há buffer livre.
+  void add_video_skip();
 
   void shutdown();
 
@@ -133,7 +142,7 @@ class Runtime {
   size_t ring_size_ = 0;
   bool connected_ = false;
   std::deque<CaptureRequest> captures_;
-  std::unique_ptr<X11Input> x11_;
+  std::unique_ptr<InputBackend> x11_;
   bool x11_tried_ = false;
   uint32_t x11_window_ = 0;
   Hotkey keys_[kHotkeyActions];
@@ -178,6 +187,9 @@ class Runtime {
   std::condition_variable out_cv_;
   std::deque<Outgoing> out_;
   int wake_fd_ = -1;
+#ifdef _WIN32
+  void *wake_event_ = nullptr;  // acorda a thread de IPC (o eventfd do Linux)
+#endif
   std::atomic<bool> stop_{false};
   std::thread thread_;
   std::atomic<uint32_t> next_swapchain_id_{0};

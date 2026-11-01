@@ -150,6 +150,24 @@ sudo apt install ./framux_0.4.6-1_${d}_amd64.deb \
 **Remover:** `framux flatpak disable` (se integrou ao Steam Flatpak) e `sudo dnf remove framux framux-layer` ou `sudo apt remove framux framux-layer framux-layer:i386`.
 **Do código-fonte:** veja [Compilar](#compilar).
 
+### Windows 10 e 11 (64 bits)
+
+| Arquivo                                   | Conteúdo                                                        |
+| ----------------------------------------- | --------------------------------------------------------------- |
+| `framux-0.4.6-windows-x64-setup.exe`      | instalador: janela, CLI, daemon, camada Vulkan, atalho no menu  |
+| `framux-0.4.6-windows-x64.zip`            | a mesma coisa, portátil (roda sem instalar)                     |
+
+O instalador registra a camada Vulkan e põe você no grupo **Usuários do log de desempenho**, que dá ao daemon a leitura dos eventos de desempenho do Windows (o FPS de jogos DirectX e OpenGL) sem ser administrador. **Saia e entre de novo no Windows** depois de instalar. Requer o Windows 10 2004 ou mais novo.
+
+Como cada tipo de jogo é atendido no Windows:
+
+| API                       | FPS e benchmark                         | Contador                                   | Screenshot e gravação          |
+| ------------------------- | --------------------------------------- | ------------------------------------------ | ------------------------------ |
+| Vulkan                    | camada no jogo (como no Linux)          | dentro do jogo, inclusive tela cheia       | camada no jogo                 |
+| Direct3D 9/10/11/12, OpenGL | eventos de present do Windows (ETW)   | janela sobreposta (janela e sem bordas)    | Windows Graphics Capture       |
+
+Nos jogos DirectX e OpenGL nada é injetado no processo do jogo: o Framux mede e captura de fora, como o PresentMon e a Barra de Jogos, então não briga com anti-cheat. Em tela cheia exclusiva (rara nos jogos atuais) o contador sobreposto não aparece; o resto funciona. A gravação usa NVENC (NVIDIA), AMF (AMD) ou QSV (Intel) e grava só o som do jogo (loopback de processo do WASAPI).
+
 ## Uso
 
 Abra **Framux** no menu de aplicativos (ou `framux` sem argumentos). Na aba **Geral**, ligue _Ativar automaticamente nos jogos_ e saia/entre na sessão uma vez. Jogos OpenGL nativos ou fora da Steam usam `framux run %command%` nas opções de inicialização.
@@ -371,6 +389,17 @@ meson setup build --libdir=lib/x86_64-linux-gnu && ninja -C build
 Os testes unitários usam o Catch2 v2; Debian e Ubuntu só têm a v3, então lá eles são pulados (os de integração rodam).
 
 **RPM:** [`packaging/framux.spec`](packaging/framux.spec) gera `framux` (GUI, CLI, daemon, unidades systemd user, `.desktop` e ícone) e `framux-layer` (camada + shim + manifesto). Para jogos 32 bits, gere também o `framux-layer.i686` com `rpmbuild -bb --target i686`.
+
+**Windows:** com o [MSYS2](https://www.msys2.org/), no shell **UCRT64**:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-{gcc,meson,ninja,pkgconf,qt6-base,ffmpeg,libpng,libjpeg-turbo} \
+  mingw-w64-ucrt-x86_64-{vulkan-headers,vulkan-loader,vulkan-utility-libraries,tomlplusplus,ntldd,nsis}
+meson setup build-win --buildtype=release -Dtests=false && ninja -C build-win
+packaging/windows/build-dist.sh build-win   # pasta portátil, .zip e instalador em dist/
+```
+
+No Windows o build troca as partes do sistema: named pipes no lugar do socket Unix e do memfd, um pipe de controle no lugar do D-Bus, WASAPI no lugar do PipeWire, o registro no lugar do systemd/environment.d, e para jogos DirectX/OpenGL o ETW, o Windows Graphics Capture e a janela sobreposta no lugar do shim OpenGL (`src/daemon/*_win.cpp`, `src/common/*_win.cpp`). `-Drecording=disabled` compila sem FFmpeg.
 
 **DEB:** [`packaging/build-deb.sh`](packaging/build-deb.sh) gera os mesmos pacotes (mais o `framux-layer` i386) para Debian 13, Ubuntu 24.04 e Ubuntu 26.04 em contêineres podman, sem sudo, a partir de [`packaging/debian/`](packaging/debian/). A saída fica em `deb/`.
 

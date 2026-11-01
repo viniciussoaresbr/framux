@@ -10,7 +10,17 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#include <d3d11.h>
+#include <d3d11_1.h>
+extern "C" {
+#include <libavutil/hwcontext_d3d11va.h>
+}
+#else
 #include <sys/resource.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -19,6 +29,7 @@ extern "C" {
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -34,7 +45,11 @@ namespace framux::daemon {
 
 namespace {
 
+#ifdef _WIN32
+enum class Kind { Nvenc, Amf, Qsv, Svt, X264, Utvideo };
+#else
 enum class Kind { Nvenc, Vaapi, Svt, X264, Utvideo };
+#endif
 
 struct EncDef {
   const char *key;     // [video] encoder
@@ -46,9 +61,15 @@ struct EncDef {
 // (quase nenhuma CPU), AV1 antes de H.264; sem placa, CPU. HEVC ficou de
 // fora: o Fedora sem RPM Fusion não o decodifica. O teto de taxa
 // (video_rate.h) deixa o H.264 leve para o openh264 do Fedora tocar.
+// No Windows, a placa é a da NVIDIA (NVENC), AMD (AMF) ou Intel (QSV).
 constexpr EncDef kDefs[] = {
+#ifdef _WIN32
+    {"av1_hw", "av1_nvenc", Kind::Nvenc},   {"av1_hw", "av1_amf", Kind::Amf},   {"av1_hw", "av1_qsv", Kind::Qsv},
+    {"h264_hw", "h264_nvenc", Kind::Nvenc}, {"h264_hw", "h264_amf", Kind::Amf}, {"h264_hw", "h264_qsv", Kind::Qsv},
+#else
     {"av1_hw", "av1_nvenc", Kind::Nvenc},   {"av1_hw", "av1_vaapi", Kind::Vaapi},
     {"h264_hw", "h264_nvenc", Kind::Nvenc}, {"h264_hw", "h264_vaapi", Kind::Vaapi},
+#endif
     {"av1_sw", "libsvtav1", Kind::Svt},     {"x264", "libx264", Kind::X264},
     {"utvideo", "utvideo", Kind::Utvideo},
 };
@@ -58,7 +79,12 @@ bool on_cpu(Kind k) { return k == Kind::Svt || k == Kind::X264 || k == Kind::Utv
 // Codificador no processador disputa os núcleos com o jogo. Com nice 10 a
 // thread perde a disputa: a gravação descarta quadros em vez de o jogo travar.
 // As threads criadas depois (do SVT-AV1, do Ut Video, do swscale) herdam.
+#ifdef _WIN32
+// No Windows a prioridade é por thread e não passa às threads criadas depois.
+void yield_to_game() { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST); }
+#else
 void yield_to_game() { setpriority(PRIO_PROCESS, gettid(), 10); }
+#endif
 
 // Quadros já convertidos esperando o encoder (~270 ms a 60 fps): cobrem a
 // abertura do encoder e os picos do SVT-AV1 sem segurar os slots do jogo.
@@ -110,7 +136,12 @@ AVPixelFormat pick_format(const AVCodec *codec, std::initializer_list<AVPixelFor
 AVPixelFormat sw_format_for(const EncDef &def, const AVCodec *codec) {
   switch (def.kind) {
     case Kind::Nvenc: return pick_format(codec, {AV_PIX_FMT_NV12, AV_PIX_FMT_YUV420P});
+#ifdef _WIN32
+    case Kind::Amf:
+    case Kind::Qsv: return pick_format(codec, {AV_PIX_FMT_NV12});  // da memória do sistema
+#else
     case Kind::Vaapi: return AV_PIX_FMT_NV12;  // superfícies NV12
+#endif
     case Kind::Svt:
     case Kind::X264: return AV_PIX_FMT_YUV420P;
     case Kind::Utvideo: return pick_format(codec, {AV_PIX_FMT_GBRP});
@@ -141,8 +172,10 @@ struct OpenEncoder {
 // Configura e abre `def` em w×h. Devolve false (com o motivo) se o encoder
 // não existir ou o hardware recusar. `capped`: qualidade constante com teto
 // de taxa; o VA-API sem modo VBR no driver tenta de novo sem teto (CQP).
+// `gpu_frames`: quadros D3D11 NV12 (gravação pela GPU no Windows); só o
+// NVENC e o AMF aceitam.
 bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &quality, bool global_header,
-                  OpenEncoder &out, std::string *why, bool capped = true) {
+                  OpenEncoder &out, std::string *why, bool capped = true, AVBufferRef *gpu_frames = nullptr) {
   out.reset();
   const AVCodec *codec = avcodec_find_encoder_by_name(def.ffname);
   if (!codec) {
@@ -168,11 +201,28 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
     c->rc_buffer_size = int(std::min<int64_t>(cap * 2, INT32_MAX));  // ~2 s de folga para cenas pesadas
   };
   out.sw_format = sw_format_for(def, codec);
+#ifdef _WIN32
+  if (gpu_frames) {
+    if (def.kind != Kind::Nvenc && def.kind != Kind::Amf) {
+      *why = std::string(def.ffname) + " não recebe quadros da GPU";
+      avcodec_free_context(&c);
+      out.reset();
+      return false;
+    }
+    // O quadro chega pronto (D3D11 NV12): sem conversão nem envio.
+    out.sw_format = AV_PIX_FMT_D3D11;
+    c->hw_frames_ctx = av_buffer_ref(gpu_frames);
+  }
+#endif
   int r = 0;
   switch (def.kind) {
     case Kind::Nvenc:
       c->pix_fmt = out.sw_format;
       av_opt_set(c->priv_data, "preset", "p4", 0);
+      // Quadros da GPU: o NVENC espera a conversão de cada um terminar na GPU,
+      // atrás do jogo. Com só ~3 em andamento (o padrão), essa espera limitava
+      // a taxa; com 16, ela se sobrepõe.
+      if (gpu_frames) av_opt_set_int(c->priv_data, "surfaces", 16, 0);
       av_opt_set(c->priv_data, "tune", "hq", 0);
       av_opt_set(c->priv_data, "rc", "vbr", 0);
       av_opt_set_int(c->priv_data, "cq", av1 ? quality_value(quality, 26, 32, 38) : quality_value(quality, 21, 26, 31),
@@ -180,6 +230,28 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
       c->bit_rate = 0;
       set_cap();
       break;
+#ifdef _WIN32
+    case Kind::Amf:
+      // QVBR: qualidade constante com teto de taxa; quadros NV12 da memória do
+      // sistema (ou D3D11, na gravação pela GPU).
+      c->pix_fmt = out.sw_format;
+      av_opt_set(c->priv_data, "quality", "balanced", 0);
+      av_opt_set(c->priv_data, "rc", "qvbr", 0);
+      av_opt_set_int(c->priv_data, "qvbr_quality_level",
+                     av1 ? quality_value(quality, 26, 32, 38) : quality_value(quality, 21, 26, 31), 0);
+      c->bit_rate = cap * 3 / 4;
+      set_cap();
+      break;
+    case Kind::Qsv:
+      // global_quality com rc_max_rate liga o QVBR (sem teto seria ICQ). Sem hw_frames: o
+      // encoder abre a própria sessão e copia os quadros NV12 da memória do sistema.
+      c->pix_fmt = out.sw_format;
+      av_opt_set(c->priv_data, "preset", "faster", 0);
+      c->global_quality = av1 ? quality_value(quality, 26, 32, 38) : quality_value(quality, 21, 26, 31);
+      c->bit_rate = cap * 3 / 4;
+      set_cap();
+      break;
+#else
     case Kind::Vaapi: {
       r = av_hwdevice_ctx_create(&out.hw_device, AV_HWDEVICE_TYPE_VAAPI, nullptr, nullptr, 0);
       if (r < 0) {
@@ -213,6 +285,7 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
       }
       break;
     }
+#endif
     case Kind::Svt:
       c->pix_fmt = out.sw_format;
       av_opt_set(c->priv_data, "preset", "10", 0);  // tempo real em CPU de jogo
@@ -233,7 +306,11 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
       c->color_range = AVCOL_RANGE_JPEG;
       c->color_trc = AVCOL_TRC_IEC61966_2_1;
       // Um quadro por thread, em metade dos núcleos: com todos, o jogo travava.
+#ifdef _WIN32
+      c->thread_count = int(std::max<long>(long(std::thread::hardware_concurrency()) / 2, 1));
+#else
       c->thread_count = int(std::max<long>(sysconf(_SC_NPROCESSORS_ONLN) / 2, 1));
+#endif
       av_opt_set(c->priv_data, "pred", "median", 0);
       break;
   }
@@ -247,7 +324,9 @@ bool open_encoder(const EncDef &def, int w, int h, int fps, const std::string &q
     *why = std::string(def.ffname) + ": " + av_err(r);
     avcodec_free_context(&c);
     out.reset();
+#ifndef _WIN32
     if (def.kind == Kind::Vaapi && cap) return open_encoder(def, w, h, fps, quality, global_header, out, why, false);
+#endif
     return false;
   }
   out.ctx = c;
@@ -278,17 +357,32 @@ int fd_write(void *opaque, AvioBuf buf, int n) {
 
 int64_t fd_seek(void *opaque, int64_t off, int whence) {
   const int fd = *static_cast<int *>(opaque);
+#ifdef _WIN32
+  // off_t e struct stat do CRT têm 32 bits: as variantes i64 passam dos 2 GB.
+  if (whence & AVSEEK_SIZE) {
+    struct _stati64 st;
+    return _fstati64(fd, &st) == 0 ? int64_t(st.st_size) : AVERROR(errno);
+  }
+  const __int64 r = _lseeki64(fd, off, whence & ~AVSEEK_FORCE);
+  return r < 0 ? AVERROR(errno) : int64_t(r);
+#else
   if (whence & AVSEEK_SIZE) {
     struct stat st;
     return fstat(fd, &st) == 0 ? int64_t(st.st_size) : AVERROR(errno);
   }
   const off_t r = lseek(fd, off_t(off), whence & ~AVSEEK_FORCE);
   return r < 0 ? AVERROR(errno) : int64_t(r);
+#endif
 }
 
 uint64_t file_size(const std::string &path) {
+#ifdef _WIN32
+  struct _stati64 st;
+  return _stati64(path.c_str(), &st) == 0 ? uint64_t(st.st_size) : 0;
+#else
   struct stat st;
   return stat(path.c_str(), &st) == 0 ? uint64_t(st.st_size) : 0;
+#endif
 }
 
 // MKV → MP4 sem recodificar. Devolve o caminho novo ou vazio (com `err`).
@@ -374,12 +468,17 @@ EncoderProbe probe_encoders() {
   };
   if (!has("h264_hw"))
     p.missing =
+#ifdef _WIN32
+        "H.264 por placa de vídeo indisponível. Atualize o driver da placa: NVIDIA (NVENC), AMD Adrenalin (AMF) "
+        "ou Intel Arc/Iris (Quick Sync).";
+#else
 #if FRAMUX_DEBIAN
         "H.264 por placa de vídeo indisponível. AMD: instale mesa-va-drivers; Intel: intel-media-va-driver-non-free; "
 #else
         "H.264 por placa de vídeo indisponível. AMD/Intel: instale mesa-va-drivers-freeworld do RPM Fusion; "
 #endif
         "NVIDIA: use o driver proprietário.";
+#endif
   return p;
 }
 
@@ -448,6 +547,188 @@ struct Scaler {
   }
 };
 
+#ifdef _WIN32
+// ---------------------------------------------------------------------------
+// Conversão na GPU (gravação pela GPU no Windows)
+
+// Recorte BGRA da captura → NV12 BT.709 limitado num quadro do pool D3D11 do
+// encoder, pelo processador de vídeo do D3D11 (sem shaders). Usado só na
+// thread da captura, dona do contexto imediato do dispositivo.
+struct GpuConv {
+  template <class T>
+  static void drop(T *&p) {
+    if (p) p->Release();
+    p = nullptr;
+  }
+
+  ID3D11Device *dev = nullptr;
+  ID3D11DeviceContext *ctx = nullptr;
+  ID3D11VideoDevice *vdev = nullptr;
+  ID3D11VideoContext *vctx = nullptr;
+  ID3D11VideoContext1 *vctx1 = nullptr;  // espaços de cor DXGI (Windows 10+)
+  uint32_t out_w = 0, out_h = 0;
+  // Direto: o processador de vídeo lê a textura do Windows (só o recorte),
+  // sem cópia intermediária; com a GPU disputada, cada quadro custa menos e
+  // o buffer do Windows volta antes ao pool dele. Se o driver não aceitar a
+  // textura do Windows como entrada, copia o recorte para `src` antes.
+  bool direct = true;
+  // Dependem do tamanho da entrada (refeitos se a janela mudar de tamanho).
+  uint32_t in_w = 0, in_h = 0;
+  DXGI_FORMAT in_fmt = DXGI_FORMAT_UNKNOWN;
+  ID3D11Texture2D *src = nullptr;  // cópia do recorte (sem `direct`)
+  ID3D11VideoProcessorEnumerator *vpe = nullptr;
+  ID3D11VideoProcessor *vp = nullptr;
+  // Views por textura (o pool do Windows e o do encoder reaproveitam as
+  // texturas; cada view segura a sua).
+  std::vector<std::pair<ID3D11Texture2D *, ID3D11VideoProcessorInputView *>> in_views;
+  std::vector<std::pair<ID3D11Texture2D *, ID3D11VideoProcessorOutputView *>> out_views;
+
+  ~GpuConv() {
+    reset_size();
+    drop(vctx1);
+    drop(vctx);
+    drop(vdev);
+    drop(ctx);
+    drop(dev);
+  }
+
+  void reset_size() {
+    for (auto &v : out_views) drop(v.second);
+    out_views.clear();
+    for (auto &v : in_views) drop(v.second);
+    in_views.clear();
+    drop(vp);
+    drop(vpe);
+    drop(src);
+    in_w = in_h = 0;
+  }
+
+  bool init(ID3D11Device *d, uint32_t w, uint32_t h) {
+    dev = d;
+    dev->AddRef();
+    dev->GetImmediateContext(&ctx);
+    out_w = w;
+    out_h = h;
+    if (FAILED(dev->QueryInterface(__uuidof(ID3D11VideoDevice), reinterpret_cast<void **>(&vdev))) ||
+        FAILED(ctx->QueryInterface(__uuidof(ID3D11VideoContext), reinterpret_cast<void **>(&vctx))))
+      return false;
+    ctx->QueryInterface(__uuidof(ID3D11VideoContext1), reinterpret_cast<void **>(&vctx1));
+    return true;
+  }
+
+  // Entrada de w×h (a textura do Windows inteira, ou o recorte copiado).
+  bool setup(uint32_t w, uint32_t h, DXGI_FORMAT fmt) {
+    reset_size();
+    if (!direct) {
+      D3D11_TEXTURE2D_DESC td{};
+      td.Width = w;
+      td.Height = h;
+      td.MipLevels = 1;
+      td.ArraySize = 1;
+      td.Format = fmt;
+      td.SampleDesc.Count = 1;
+      td.Usage = D3D11_USAGE_DEFAULT;
+      td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+      if (FAILED(dev->CreateTexture2D(&td, nullptr, &src))) return false;
+    }
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd{};
+    cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    cd.InputFrameRate = {60, 1};
+    cd.InputWidth = w;
+    cd.InputHeight = h;
+    cd.OutputFrameRate = {60, 1};
+    cd.OutputWidth = out_w;
+    cd.OutputHeight = out_h;
+    cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+    if (FAILED(vdev->CreateVideoProcessorEnumerator(&cd, &vpe)) || FAILED(vdev->CreateVideoProcessor(vpe, 0, &vp)))
+      return false;
+    // RGB do jogo (faixa cheia) → YUV BT.709 de faixa limitada, o que os
+    // players esperam (o mesmo da conversão no processador).
+    if (vctx1) {
+      vctx1->VideoProcessorSetStreamColorSpace1(vp, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+      vctx1->VideoProcessorSetOutputColorSpace1(vp, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+    } else {
+      D3D11_VIDEO_PROCESSOR_COLOR_SPACE in{}, out{};
+      in.RGB_Range = 0;  // 0–255
+      out.YCbCr_Matrix = 1;  // BT.709
+      out.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+      vctx->VideoProcessorSetStreamColorSpace(vp, 0, &in);
+      vctx->VideoProcessorSetOutputColorSpace(vp, &out);
+    }
+    vctx->VideoProcessorSetStreamFrameFormat(vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    vctx->VideoProcessorSetStreamAutoProcessingMode(vp, 0, FALSE);
+    const RECT out_rect{0, 0, LONG(out_w), LONG(out_h)};
+    vctx->VideoProcessorSetStreamDestRect(vp, 0, TRUE, &out_rect);
+    vctx->VideoProcessorSetOutputTargetRect(vp, TRUE, &out_rect);
+    in_w = w;
+    in_h = h;
+    in_fmt = fmt;
+    return true;
+  }
+
+  ID3D11VideoProcessorInputView *input_view(ID3D11Texture2D *t) {
+    for (auto &v : in_views)
+      if (v.first == t) return v.second;
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
+    iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    ID3D11VideoProcessorInputView *view = nullptr;
+    if (FAILED(vdev->CreateVideoProcessorInputView(t, vpe, &iv, &view))) return nullptr;
+    in_views.emplace_back(t, view);
+    return view;
+  }
+
+  // Converte o recorte (x, y, w, h) de `tex` no quadro `out` (do pool D3D11).
+  bool blit(ID3D11Texture2D *tex, uint32_t x, uint32_t y, uint32_t w, uint32_t h, AVFrame *out) {
+    D3D11_TEXTURE2D_DESC d;
+    tex->GetDesc(&d);
+    const uint32_t need_w = direct ? d.Width : w, need_h = direct ? d.Height : h;
+    if (need_w != in_w || need_h != in_h || d.Format != in_fmt || !vp) {
+      if (!setup(need_w, need_h, d.Format)) {
+        reset_size();
+        return false;
+      }
+    }
+    ID3D11VideoProcessorInputView *in = nullptr;
+    if (direct && !(in = input_view(tex))) {
+      FRAMUX_LOG("gravação pela GPU: o driver não lê a textura da captura direto; copiando o recorte antes");
+      direct = false;
+      return blit(tex, x, y, w, h, out);
+    }
+    auto *dst = reinterpret_cast<ID3D11Texture2D *>(out->data[0]);
+    ID3D11VideoProcessorOutputView *view = nullptr;
+    for (auto &v : out_views)
+      if (v.first == dst) view = v.second;
+    if (!view) {
+      D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{};
+      ov.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+      if (FAILED(vdev->CreateVideoProcessorOutputView(dst, vpe, &ov, &view))) return false;
+      out_views.emplace_back(dst, view);
+    }
+    RECT src_rect{LONG(x), LONG(y), LONG(x + w), LONG(y + h)};
+    if (!direct) {
+      const D3D11_BOX box{x, y, 0, x + w, y + h, 1};
+      ctx->CopySubresourceRegion(src, 0, 0, 0, 0, tex, 0, &box);
+      if (!(in = input_view(src))) return false;
+      src_rect = RECT{0, 0, LONG(w), LONG(h)};
+    }
+    vctx->VideoProcessorSetStreamSourceRect(vp, 0, TRUE, &src_rect);
+    D3D11_VIDEO_PROCESSOR_STREAM st{};
+    st.Enable = TRUE;
+    st.pInputSurface = in;
+    if (FAILED(vctx->VideoProcessorBlt(vp, view, 0, 1, &st))) return false;
+    ctx->Flush();
+    return true;
+  }
+};
+
+// Quadros da GPU esperando a conversão (que só lhes dá a posição): acima
+// disso, o encoder está atrasado e a captura descarta em vez de acumular.
+// O pool D3D11 é dinâmico (um array de NV12 como destino de renderização não
+// existe em todo driver); o número de texturas fica limitado por esta fila,
+// pela do encoder (kMaxQueuedFrames) e pelas superfícies do encoder.
+constexpr size_t kGpuMaxPending = 8;
+#endif
+
 // ---------------------------------------------------------------------------
 // Recorder
 
@@ -462,6 +743,7 @@ struct Recorder::Impl {
     bool flip_y, halved;
     uint64_t present_ns;
     std::function<void()> release;
+    AVFrame *gpu = nullptr;  // quadro D3D11 NV12 já pronto (gravação pela GPU)
   };
   struct AudioItem {
     std::vector<float> samples;
@@ -490,6 +772,19 @@ struct Recorder::Impl {
   std::atomic<bool> failed{false};
   std::string error;  // mu
   std::atomic<uint64_t> layer_drops{0};
+
+  // Diagnóstico: tempo de cada etapa (soma, pior, vezes), registrado no fim.
+  struct Timing {
+    uint64_t sum = 0, max = 0, n = 0;
+    void add(uint64_t ns) {
+      sum += ns;
+      max = std::max(max, ns);
+      ++n;
+    }
+    double avg_ms() const { return n ? double(sum) / double(n) / 1e6 : 0.0; }
+    double max_ms() const { return double(max) / 1e6; }
+  };
+  Timing t_sws, t_space, t_enc;  // conversão, espera por vaga na fila do encoder, avcodec_send_frame
   RecorderResult result;  // dropped é da conversão; o resto, do encoder
 
   // Só a thread de conversão.
@@ -497,6 +792,7 @@ struct Recorder::Impl {
   AVFrame *src = nullptr;  // embrulha o slot, sem cópia
   AVPixelFormat planned = AV_PIX_FMT_NONE;
   bool planned_cpu = false;  // planned é de um encoder no processador
+  const EncDef *planned_def = nullptr;
   int out_w = 0, out_h = 0;
   bool conv_started = false;
   bool gpu_yuv = false;  // a camada mandou NV12 (lido pelo encoder depois do 1º quadro)
@@ -536,6 +832,19 @@ struct Recorder::Impl {
   // Qualquer thread.
   std::atomic<float> volume[2] = {1.0f, 1.0f};
 
+#ifdef _WIN32
+  // Gravação pela GPU: dispositivo e pool D3D11 (criados em gpu_open, antes
+  // do primeiro quadro; o encoder os usa) e o conversor (só a captura).
+  AVBufferRef *gpu_dev = nullptr;
+  AVBufferRef *gpu_frames = nullptr;
+  std::unique_ptr<GpuConv> gconv;
+  ~Impl() {
+    gconv.reset();
+    av_buffer_unref(&gpu_frames);
+    av_buffer_unref(&gpu_dev);
+  }
+#endif
+
   void fail(const std::string &e) {
     {
       std::lock_guard lk(mu);
@@ -564,6 +873,7 @@ struct Recorder::Impl {
       const AVCodec *codec = avcodec_find_encoder_by_name(d->ffname);
       if (codec && (planned = sw_format_for(*d, codec)) != AV_PIX_FMT_NONE) {
         planned_cpu = on_cpu(d->kind);
+        planned_def = d;
         break;
       }
     }
@@ -580,6 +890,12 @@ struct Recorder::Impl {
   // ------------------------------------------------------------------ conversão
 
   void convert(VideoItem &v) {
+#ifdef _WIN32
+    if (v.gpu) {
+      convert_gpu(v);
+      return;
+    }
+#endif
     const AVPixelFormat sf = src_format(v.vk_format);
     if (sf == AV_PIX_FMT_NONE) {
       v.release();
@@ -605,12 +921,23 @@ struct Recorder::Impl {
       conv_start_ns = v.present_ns;
       conv_started = true;
       // RGB→YUV de 2560×1080 leva ~7 ms num núcleo; em fatias, ~2 ms.
+#ifdef _WIN32
+      const long cpus = long(std::thread::hardware_concurrency());
+#else
       const long cpus = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
       sws.flags = SWS_BILINEAR;
       sws.threads = int(std::clamp<long>(cpus / 2, 1, 4));
       src = av_frame_alloc();
     }
-    const int64_t index = std::llround(double(v.present_ns - std::min(v.present_ns, conv_start_ns)) * opt.fps / 1e9);
+    const double pos = double(v.present_ns - std::min(v.present_ns, conv_start_ns)) * opt.fps / 1e9;
+    int64_t index = std::llround(pos);
+    // Quadros com horário irregular (captura de fora do jogo com a GPU
+    // disputada) caem às vezes no slot do anterior: em vez de descartar um e
+    // repetir o seguinte, vai para o próximo slot (no máximo 1,5 quadro de
+    // atraso; com o jogo perto da taxa do vídeo, quase todo quadro cai perto
+    // da fronteira de um slot).
+    if (index == conv_last_index) index = conv_last_index + 1;
     if (v.present_ns < conv_start_ns || index <= conv_last_index) {
       ++result.dropped;
       v.release();
@@ -645,7 +972,9 @@ struct Recorder::Impl {
       src->data[0] += size_t(v.height - 1) * v.stride;
       src->linesize[0] = -int(v.stride);
     }
+    const uint64_t t_sws0 = now_ns();
     const int r = sws.scale(out, src);
+    t_sws.add(now_ns() - t_sws0);
     v.release();  // o slot volta para a camada o quanto antes
     if (r < 0) {
       av_frame_free(&out);
@@ -655,7 +984,9 @@ struct Recorder::Impl {
     conv_last_index = index;
     {
       std::unique_lock lk(mu);
+      const uint64_t t_space0 = now_ns();
       space_cv.wait(lk, [&] { return queued_frames < kMaxQueuedFrames || failed; });
+      t_space.add(now_ns() - t_space0);
       if (failed) {
         av_frame_free(&out);
         return;
@@ -665,6 +996,44 @@ struct Recorder::Impl {
     }
     enc_cv.notify_one();
   }
+
+#ifdef _WIN32
+  // Quadro da GPU: já está no formato e no tamanho do encoder; aqui só ganha
+  // a posição na linha do tempo (a mesma regra dos quadros da memória).
+  void convert_gpu(VideoItem &v) {
+    AVFrame *f = v.gpu;
+    v.gpu = nullptr;
+    if (!conv_started) {
+      out_w = f->width;
+      out_h = f->height;
+      gpu_yuv = true;
+      conv_start_ns = v.present_ns;
+      conv_started = true;
+    }
+    const double pos = double(v.present_ns - std::min(v.present_ns, conv_start_ns)) * opt.fps / 1e9;
+    int64_t index = std::llround(pos);
+    if (index == conv_last_index) index = conv_last_index + 1;
+    if (v.present_ns < conv_start_ns || index <= conv_last_index) {
+      ++result.dropped;
+      av_frame_free(&f);
+      return;
+    }
+    conv_last_index = index;
+    {
+      std::unique_lock lk(mu);
+      const uint64_t t_space0 = now_ns();
+      space_cv.wait(lk, [&] { return queued_frames < kMaxQueuedFrames || failed; });
+      t_space.add(now_ns() - t_space0);
+      if (failed) {
+        av_frame_free(&f);
+        return;
+      }
+      encq.push_back(FrameItem{f, index, v.present_ns});
+      ++queued_frames;
+    }
+    enc_cv.notify_one();
+  }
+#endif
 
   void conv_main() {
     pthread_setname_np(pthread_self(), "framux-rec");
@@ -678,10 +1047,12 @@ struct Recorder::Impl {
         v = std::move(input.front());
         input.pop_front();
       }
-      if (failed)
+      if (failed) {
         v.release();
-      else
+        av_frame_free(&v.gpu);
+      } else {
         convert(v);
+      }
     }
     sws.reset();
     av_frame_free(&src);
@@ -712,7 +1083,9 @@ struct Recorder::Impl {
   }
 
   bool encode_video(AVFrame *f) {
+    const uint64_t t_enc0 = now_ns();
     int r = avcodec_send_frame(venc.ctx, f);
+    if (f) t_enc.add(now_ns() - t_enc0);
     if (r < 0 && r != AVERROR_EOF) {
       fail("encoder recusou o quadro: " + av_err(r));
       return false;
@@ -783,7 +1156,9 @@ struct Recorder::Impl {
     }
     const bool global = fmt->oformat->flags & AVFMT_GLOBALHEADER;
     std::string why, all_why;
+    // Na gravação pela GPU o encoder já foi aberto em gpu_open.
     for (const EncDef *d : order) {
+      if (venc.ctx) break;
       if (on_cpu(d->kind)) yield_to_game();
       if (open_encoder(*d, w, h, opt.fps, opt.quality, global, venc, &why)) break;
       FRAMUX_LOG("gravação: %s", why.c_str());
@@ -1091,6 +1466,119 @@ void Recorder::push_video(const uint8_t *data, uint32_t width, uint32_t height, 
   impl_->conv_cv.notify_one();
 }
 
+#ifdef _WIN32
+bool Recorder::gpu_open(void *device, uint32_t width, uint32_t height) {
+  Impl &im = *impl_;
+  if (const char *g = std::getenv("FRAMUX_GPU_RECORDING"); g && !std::strcmp(g, "0")) return false;
+  const EncDef *d = im.planned_def;
+  if (!d || (d->kind != Kind::Nvenc && d->kind != Kind::Amf)) return false;
+  if (im.opt.quality == "lossless") return false;
+  int w = int(width), h = int(height);
+  if (im.opt.half) {
+    w /= 2;
+    h /= 2;
+  }
+  w &= ~1;
+  h &= ~1;
+  if (w < 16 || h < 16) return false;
+  auto *dev = static_cast<ID3D11Device *>(device);
+  // O encoder usa o dispositivo na thread dele; a captura, na dela.
+  ID3D10Multithread *mt = nullptr;
+  if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D10Multithread), reinterpret_cast<void **>(&mt)))) {
+    mt->SetMultithreadProtected(TRUE);
+    mt->Release();
+  }
+  AVBufferRef *dref = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
+  if (!dref) return false;
+  auto *hw = static_cast<AVD3D11VADeviceContext *>(reinterpret_cast<AVHWDeviceContext *>(dref->data)->hwctx);
+  dev->AddRef();  // o FFmpeg solta ao liberar o contexto
+  hw->device = dev;
+  int r = av_hwdevice_ctx_init(dref);
+  AVBufferRef *fref = r >= 0 ? av_hwframe_ctx_alloc(dref) : nullptr;
+  if (fref) {
+    auto *fc = reinterpret_cast<AVHWFramesContext *>(fref->data);
+    fc->format = AV_PIX_FMT_D3D11;
+    fc->sw_format = AV_PIX_FMT_NV12;
+    fc->width = w;
+    fc->height = h;
+    fc->initial_pool_size = 0;  // texturas avulsas, criadas sob demanda e reaproveitadas
+    static_cast<AVD3D11VAFramesContext *>(fc->hwctx)->BindFlags = D3D11_BIND_RENDER_TARGET;
+    r = av_hwframe_ctx_init(fref);
+  }
+  auto conv = std::make_unique<GpuConv>();
+  if (r < 0 || !fref || !conv->init(dev, uint32_t(w), uint32_t(h))) {
+    FRAMUX_LOG("gravação pela GPU indisponível (%s); quadros pela memória",
+               r < 0 ? av_err(r).c_str() : "sem processador de vídeo D3D11");
+    av_buffer_unref(&fref);
+    av_buffer_unref(&dref);
+    return false;
+  }
+  // Abre aqui o encoder que a gravação usaria (o primeiro da ordem que
+  // funcionar), já com os quadros da GPU. O FFmpeg traz o NVENC e o AMF mesmo
+  // sem a placa deles: se o que funcionar for outro (QSV, processador), a
+  // gravação segue pela memória com ele. As threads do Recorder só mexem no
+  // encoder depois do primeiro quadro, que ainda não chegou.
+  const AVOutputFormat *mkv = av_guess_format("matroska", nullptr, nullptr);
+  const bool global = mkv && (mkv->flags & AVFMT_GLOBALHEADER);
+  std::string why;
+  for (const EncDef *e : im.order) {
+    if (!avcodec_find_encoder_by_name(e->ffname)) continue;
+    if (e->kind != Kind::Nvenc && e->kind != Kind::Amf) break;
+    if (open_encoder(*e, w, h, im.opt.fps, im.opt.quality, global, im.venc, &why, true, fref)) break;
+    FRAMUX_LOG("gravação pela GPU: %s", why.c_str());
+  }
+  if (!im.venc.ctx) {
+    av_buffer_unref(&fref);
+    av_buffer_unref(&dref);
+    return false;
+  }
+  im.gpu_dev = dref;
+  im.gpu_frames = fref;
+  im.gconv = std::move(conv);
+  return true;
+}
+
+void Recorder::gpu_push(void *texture, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                        uint64_t present_ns) {
+  Impl &im = *impl_;
+  if (!im.gconv || im.failed) return;
+  {
+    std::lock_guard lk(im.mu);
+    if (im.input.size() >= kGpuMaxPending) {
+      ++im.layer_drops;
+      return;
+    }
+  }
+  AVFrame *f = av_frame_alloc();
+  if (!f) return;
+  // Pool cheio (encoder atrasado): descarta, sem esperar.
+  if (av_hwframe_get_buffer(im.gpu_frames, f, 0) < 0) {
+    av_frame_free(&f);
+    ++im.layer_drops;
+    return;
+  }
+  f->colorspace = AVCOL_SPC_BT709;
+  f->color_range = AVCOL_RANGE_MPEG;
+  f->color_primaries = AVCOL_PRI_BT709;
+  f->color_trc = AVCOL_TRC_BT709;
+  if (!im.gconv->blit(static_cast<ID3D11Texture2D *>(texture), x, y, width, height, f)) {
+    av_frame_free(&f);
+    ++im.layer_drops;
+    FRAMUX_LOG_ONCE("gravação pela GPU: a conversão do quadro falhou");
+    return;
+  }
+  {
+    std::lock_guard lk(im.mu);
+    if (!im.stopping) {
+      im.input.push_back(Impl::VideoItem{nullptr, width, height, 0, 0, false, true, present_ns, [] {}, f});
+      f = nullptr;
+    }
+  }
+  av_frame_free(&f);
+  im.conv_cv.notify_one();
+}
+#endif
+
 void Recorder::push_audio(AudioSource src, const float *samples, uint32_t frames, uint64_t time_ns) {
   // O volume vale a partir de agora, não de quando o bloco for codificado.
   std::vector<float> v(samples, samples + size_t(frames) * 2);
@@ -1124,6 +1612,10 @@ RecorderResult Recorder::finish() {
   if (impl_->enc_thread.joinable()) impl_->enc_thread.join();
   RecorderResult r = impl_->result;
   r.dropped += impl_->layer_drops;
+  FRAMUX_LOG("gravação, etapas: conversão %.1f ms (pior %.0f ms); espera por vaga no encoder %.1f ms (pior %.0f ms); "
+             "encoder %.1f ms por quadro (pior %.0f ms, %llu quadros)",
+             impl_->t_sws.avg_ms(), impl_->t_sws.max_ms(), impl_->t_space.avg_ms(), impl_->t_space.max_ms(),
+             impl_->t_enc.avg_ms(), impl_->t_enc.max_ms(), (unsigned long long)impl_->t_enc.n);
   r.path = impl_->opt.path;
   if (impl_->failed && !impl_->started) {
     // Nada gravado: não deixa um arquivo vazio na pasta.

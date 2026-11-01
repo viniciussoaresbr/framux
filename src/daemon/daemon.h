@@ -12,6 +12,16 @@
 #include <optional>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <atomic>
+#include <mutex>
+#include <thread>
+
+#include "common/overlay.h"
+#include "daemon/etw_presents_win.h"
+#include "daemon/overlay_window_win.h"
+#include "daemon/window_capture_win.h"
+#endif
 
 #include "common/config.h"
 #include "common/fps_counter.h"
@@ -33,7 +43,11 @@ struct framux_stats;
 
 namespace framux::daemon {
 
+#ifdef _WIN32
+class X11Hotkeys {};  // sem X11 no Windows
+#else
 class X11Hotkeys;
+#endif
 
 struct Benchmark {
   uint64_t start_ns = 0;
@@ -94,6 +108,27 @@ struct Session {
   BenchStats fps_before;
   uint64_t rec_cpu_start_ns = 0;
   ipc::VideoCost video_cost{};
+  // Diagnóstico da gravação pela camada: onde os quadros se perdem.
+  struct VideoDiag {
+    std::atomic<uint64_t> arrived{0}, ring_drops{0};
+    std::atomic<uint64_t> lat_sum{0}, lat_max{0};    // present → daemon
+    std::atomic<uint64_t> hold_sum{0}, hold_max{0};  // slot preso no daemon (fila + conversão)
+    std::atomic<uint64_t> released{0};
+  };
+  std::shared_ptr<VideoDiag> video_diag;
+
+#ifdef _WIN32
+  // Jogo Direct3D/OpenGL medido de fora (ETW + captura de janela), sem
+  // camada no processo: o ring é escrito pela thread do ETW.
+  bool external = false;
+  void *ext_window = nullptr;   // HWND principal do jogo
+  void *ext_process = nullptr;  // HANDLE, para saber quando o jogo sai
+  std::unique_ptr<OverlayState> ext_overlay;
+  std::unique_ptr<WindowCapture> ext_capture;
+  bool ext_keys[6] = {};
+  bool ext_exclusive_warned = false;  // aviso de tela cheia exclusiva já dado
+  ~Session();
+#endif
 
   uint32_t primary_swapchain() const;
   const SwapStat *primary() const;
@@ -120,6 +155,21 @@ class Daemon {
   bool setup_socket(int listen_fd);
   void accept_clients();
   void on_client(int fd, uint32_t events);
+  // Uma mensagem da sessão `id`; false se a sessão foi encerrada.
+  bool dispatch(uint64_t id, ipc::Message &m);
+#ifdef _WIN32
+  void add_client(int sock);
+  void client_reader(uint64_t id, int sock);
+
+  // Jogos medidos de fora (daemon_win.cpp).
+  struct ExtProc;
+  void on_external_present(uint32_t pid, PresentSource src, uint64_t swapchain, uint64_t t);  // thread do ETW
+  void ext_candidate(uint32_t pid);
+  void ext_tick();
+  void ext_poll_keys(Session &s);
+  void ext_shot(Session &s, uint64_t request_id);
+  bool ext_video_start(Session &s, std::string *err);
+#endif
   void close_session(uint64_t id, const char *why);
   void handle_hello(Session &s, const ipc::Message &m);
   void handle_message(Session &s, ipc::Message &m);
@@ -187,6 +237,25 @@ class Daemon {
   framux_stats *stats_ = nullptr;
   uint64_t last_stats_signal_ns_ = 0;
   uint64_t last_stats_write_ns_ = 0;
+
+#ifdef _WIN32
+  // Loop do Windows (daemon_win.cpp): pipes do IPC e uma thread de leitura
+  // por jogo, que entrega as mensagens à thread principal pela main_queue_.
+  ipc::PipeListener listener_;
+  std::unique_ptr<PresentTracer> tracer_;
+  std::unique_ptr<OverlayWindow> overlay_win_;
+  std::mutex ext_mu_;
+  std::map<uint32_t, std::shared_ptr<ExtProc>> ext_procs_;  // ext_mu_
+  std::string gpu_name_;
+  void *stop_event_ = nullptr;
+  void *stats_map_ = nullptr;
+  std::atomic<bool> stopping_{false};
+  std::vector<std::thread> readers_;
+
+ public:
+  // Encerra o loop (Ctrl+C, "Parar o Framux", fim da sessão do Windows).
+  void request_stop();
+#endif
 };
 
 }  // namespace framux::daemon

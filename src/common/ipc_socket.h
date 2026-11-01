@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#include <functional>
+#include <thread>
+#endif
 
 #include "common/ipc_proto.h"
 
@@ -57,5 +61,46 @@ enum class RecvResult { Ok, WouldBlock, Closed, Error };
 RecvResult recv_msg(int sock, Message &out, int flags = 0);
 
 void set_cloexec_nonblock(int fd, bool nonblock);
+
+#ifdef _WIN32
+// No Windows o transporte é um named pipe em modo mensagem (cada mensagem é
+// um WriteFile, como os datagramas do SEQPACKET). `sock` é o id de uma
+// conexão registrada aqui; os "fds" das mensagens são handles, duplicados
+// pelo emissor para dentro do processo do outro lado (como o SCM_RIGHTS).
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0x40  // envio com prazo curto; recebimento sem esperar
+#endif
+
+// Registra um pipe já conectado. `server`: este processo criou o pipe (o
+// outro lado é o cliente). Devolve o id ou -1.
+int pipe_adopt(void *pipe, bool server);
+// Conecta ao pipe `name` (\\.\pipe\…). -1 se ninguém escuta.
+int pipe_connect(const std::string &name, uint32_t timeout_ms);
+// Cancela a I/O pendente e solta a conexão.
+void pipe_close(int sock);
+uint32_t pipe_peer_pid(int sock);
+// Espera uma mensagem, `cancel` (evento) ou o prazo (devolve WouldBlock).
+RecvResult recv_msg_wait(int sock, Message &out, void *cancel, uint32_t timeout_ms);
+
+// Escuta conexões em `name` numa thread própria; `on_connect` recebe o id
+// da conexão (na thread de escuta). Só o usuário atual pode conectar.
+class PipeListener {
+ public:
+  ~PipeListener();
+  bool start(const std::string &name, std::function<void(int sock)> on_connect, std::string *err);
+  void stop();
+
+ private:
+  void main();
+  std::string name_;
+  std::function<void(int)> on_connect_;
+  void *stop_event_ = nullptr;
+  void *first_ = nullptr;  // primeira instância, criada em start() para detectar outro servidor
+  std::thread thread_;
+};
+
+// Descritor de segurança que só dá acesso ao usuário atual (e ao SYSTEM).
+void *user_only_security(bool *ok);
+#endif
 
 }  // namespace framux::ipc

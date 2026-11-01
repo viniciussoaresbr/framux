@@ -1,8 +1,12 @@
 #include "daemon/worker.h"
 
 #include <pthread.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/eventfd.h>
 #include <unistd.h>
+#endif
 
 namespace framux::daemon {
 
@@ -43,24 +47,38 @@ void Worker::main() {
   }
 }
 
+#ifdef _WIN32
+MainQueue::MainQueue() : fd_(-1), event_(CreateEventW(nullptr, FALSE, FALSE, nullptr)) {}
+
+MainQueue::~MainQueue() {
+  if (event_) CloseHandle(event_);
+}
+#else
 MainQueue::MainQueue() : fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {}
 
 MainQueue::~MainQueue() {
   if (fd_ >= 0) close(fd_);
 }
+#endif
 
 void MainQueue::post(std::function<void()> fn) {
   {
     std::lock_guard lk(mu_);
     q_.push_back(std::move(fn));
   }
+#ifdef _WIN32
+  SetEvent(event_);
+#else
   const uint64_t one = 1;
   (void)!write(fd_, &one, sizeof one);
+#endif
 }
 
 void MainQueue::run_pending() {
+#ifndef _WIN32
   uint64_t v;
   (void)!read(fd_, &v, sizeof v);
+#endif
   std::deque<std::function<void()>> q;
   {
     std::lock_guard lk(mu_);
