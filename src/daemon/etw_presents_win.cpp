@@ -41,14 +41,26 @@ struct Props {
   wchar_t name[64];
 };
 
-void init_props(Props &pr) {
+// FlushTimer em milissegundos (Windows 8+); falta no evntrace.h do MinGW.
+constexpr ULONG kUseMsFlushTimer = 0x00000010;  // EVENT_TRACE_USE_MS_FLUSH_TIMER
+constexpr ULONG kFlushMs = 20;
+
+// Os eventos chegam ao consumidor quando um buffer enche ou no FlushTimer.
+// Com poucos presents por segundo um buffer leva segundos para encher, e com
+// FlushTimer de 1 s eles chegavam em rajadas de até 1 s de atraso: o contador
+// via o último present "velho" e caía para 0 entre uma rajada e outra.
+// Buffers pequenos e descarga a cada 20 ms deixam o atraso abaixo de ~30 ms.
+void init_props(Props &pr, bool ms_flush = true) {
   std::memset(&pr, 0, sizeof pr);
   pr.p.Wnode.BufferSize = sizeof pr;
   pr.p.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
   pr.p.Wnode.ClientContext = 1;  // timestamps em QPC, o relógio de now_ns()
-  pr.p.LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+  pr.p.LogFileMode = EVENT_TRACE_REAL_TIME_MODE | (ms_flush ? kUseMsFlushTimer : 0);
   pr.p.LoggerNameOffset = offsetof(Props, name);
-  pr.p.FlushTimer = 1;
+  pr.p.BufferSize = 16;  // KB
+  pr.p.MinimumBuffers = 8;
+  pr.p.MaximumBuffers = 64;
+  pr.p.FlushTimer = ms_flush ? kFlushMs : 1;
 }
 
 void WINAPI on_record(PEVENT_RECORD r) { static_cast<PresentTracer *>(r->UserContext)->on_event(r); }
@@ -91,6 +103,12 @@ bool PresentTracer::start(Sink sink, std::string *err) {
   init_props(pr);
   TRACEHANDLE session = 0;
   ULONG rc = StartTraceW(&session, kSessionName, &pr.p);
+  if (rc == ERROR_INVALID_PARAMETER) {
+    // Sem FlushTimer em ms: descarga a cada 1 s (contador com atraso).
+    FRAMUX_LOG("ETW: descarga em milissegundos recusada; eventos chegam com até 1 s de atraso");
+    init_props(pr, false);
+    rc = StartTraceW(&session, kSessionName, &pr.p);
+  }
   if (rc != ERROR_SUCCESS) {
     if (err)
       *err = rc == ERROR_ACCESS_DENIED

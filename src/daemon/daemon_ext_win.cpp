@@ -88,6 +88,21 @@ std::string gpu_description() {
   return out;
 }
 
+// Programas da lista padrão de [filters].exclude. Um config.toml salvo
+// guarda a lista daquela versão, que substitui a padrão: os nomes acrescentados
+// depois (o player de mídia, por exemplo) nunca chegavam a quem já tinha
+// configuração. A lista padrão atual vale sempre, menos para o que estiver em
+// [filters].include. Sem diferenciar maiúsculas, como no Windows.
+bool is_known_desktop_app(const Config &cfg, const std::string &exe_base, const std::string &game) {
+  auto eq = [](const std::string &a, const std::string &b) { return !a.empty() && !_stricmp(a.c_str(), b.c_str()); };
+  for (const auto &n : cfg.filters.include)
+    if (eq(exe_base, n) || eq(game, n)) return false;
+  static const std::vector<std::string> defaults = Config{}.filters.exclude;
+  for (const auto &n : defaults)
+    if (eq(exe_base, n) || eq(game, n)) return true;
+  return false;
+}
+
 void copy_str(char *dst, size_t n, const std::string &src) {
   std::strncpy(dst, src.c_str(), n - 1);
   dst[n - 1] = '\0';
@@ -189,6 +204,10 @@ void Daemon::ext_candidate(uint32_t pid) {
   if (exe.empty() || is_excluded(cfg, id.exe_base, id.game)) {
     CloseHandle(proc);
     return ignore("excluído por [filters]", id.exe_base);
+  }
+  if (is_known_desktop_app(cfg, id.exe_base, id.game)) {
+    CloseHandle(proc);
+    return ignore("programa de desktop da lista padrão", id.exe_base);
   }
   HWND w = main_window(pid);
   if (!w) {

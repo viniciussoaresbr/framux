@@ -37,6 +37,12 @@ class OverlayWindow {
   OverlayDraw draw_;
   bool visible_ = false;
   std::thread thread_;
+  // Só na thread da janela: o que está na tela. Cada UpdateLayeredWindow faz
+  // o DWM recompor a tela sobre o jogo; sem mudança, nada é enviado.
+  OverlayDraw shown_draw_;
+  long shown_x_ = 0, shown_y_ = 0;
+  bool shown_ = false;
+  unsigned long long topmost_at_ = 0;  // GetTickCount64 do último reforço do topo
 };
 
 }  // namespace framux::daemon

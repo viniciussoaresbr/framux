@@ -21,6 +21,17 @@ uint32_t premul(OColor c) {
   return 0xFF000000u | (ch(c.r) << 16) | (ch(c.g) << 8) | ch(c.b);
 }
 
+bool same(const ORect &a, const ORect &b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
+bool same(const OColor &a, const OColor &b) { return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a; }
+bool same(const std::vector<ORect> &a, const std::vector<ORect> &b) {
+  return std::equal(a.begin(), a.end(), b.begin(), b.end(), [](const ORect &x, const ORect &y) { return same(x, y); });
+}
+bool same(const OverlayDraw &a, const OverlayDraw &b) {
+  return a.has_box == b.has_box && (!a.has_box || (same(a.box, b.box) && same(a.box_color, b.box_color))) &&
+         same(a.outline_color, b.outline_color) && same(a.text_color, b.text_color) && same(a.outline, b.outline) &&
+         same(a.text, b.text);
+}
+
 void fill(uint32_t *px, int w, int h, const ORect &r, int ox, int oy, uint32_t color) {
   const int x0 = std::max(0, r.x - ox), y0 = std::max(0, r.y - oy);
   const int x1 = std::min(w, r.x - ox + r.w), y1 = std::min(h, r.y - oy + r.h);
@@ -107,8 +118,12 @@ void OverlayWindow::render() {
     visible = visible_;
   }
   HWND self = static_cast<HWND>(hwnd_);
+  auto hide_self = [&] {
+    if (shown_) ShowWindow(self, SW_HIDE);
+    shown_ = false;
+  };
   if (!visible || !target || !IsWindow(target) || IsIconic(target)) {
-    ShowWindow(self, SW_HIDE);
+    hide_self();
     return;
   }
   // Caixa que envolve todos os retângulos: a janela tem só esse tamanho.
@@ -123,7 +138,20 @@ void OverlayWindow::render() {
   for (const ORect &r : d.outline) grow(r);
   for (const ORect &r : d.text) grow(r);
   if (x1 <= x0 || y1 <= y0) {
-    ShowWindow(self, SW_HIDE);
+    hide_self();
+    return;
+  }
+  POINT origin{0, 0};
+  ClientToScreen(target, &origin);
+  POINT pos{origin.x + x0, origin.y + y0};
+  const unsigned long long tick = GetTickCount64();
+  // Mesmo conteúdo no mesmo lugar: só reforça o topo de vez em quando (outra
+  // janela "sempre no topo" pode ter passado à frente).
+  if (shown_ && pos.x == shown_x_ && pos.y == shown_y_ && same(d, shown_draw_)) {
+    if (tick - topmost_at_ >= 1000) {
+      topmost_at_ = tick;
+      SetWindowPos(self, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
     return;
   }
   const int w = x1 - x0, h = y1 - y0;
@@ -149,9 +177,6 @@ void OverlayWindow::render() {
   for (const ORect &r : d.outline) fill(px, w, h, r, x0, y0, premul(d.outline_color));
   for (const ORect &r : d.text) fill(px, w, h, r, x0, y0, premul(d.text_color));
   HGDIOBJ old = SelectObject(mem, bmp);
-  POINT origin{0, 0};
-  ClientToScreen(target, &origin);
-  POINT pos{origin.x + x0, origin.y + y0};
   SIZE size{w, h};
   POINT src{0, 0};
   BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
@@ -160,7 +185,14 @@ void OverlayWindow::render() {
   DeleteObject(bmp);
   DeleteDC(mem);
   ReleaseDC(nullptr, screen);
-  SetWindowPos(self, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  if (!shown_ || tick - topmost_at_ >= 1000) {
+    topmost_at_ = tick;
+    SetWindowPos(self, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  }
+  shown_ = true;
+  shown_draw_ = d;
+  shown_x_ = pos.x;
+  shown_y_ = pos.y;
 }
 
 }  // namespace framux::daemon
