@@ -7,7 +7,7 @@
 <p align="center">
   <b>Contador de FPS, benchmark, screenshots e gravação de jogos — uma alternativa inspirada no FRAPS, nativa para Linux.</b><br>
   A interface simples e direta do clássico FRAPS, mas com gravação moderna: codificação pela placa de vídeo,<br>
-  arquivos compactos e baixo impacto no desempenho do jogo.
+  arquivos compactos e baixo impacto no desempenho do jogo. Também roda no Windows, num port do mesmo código.
 </p>
 
 <p align="center">
@@ -19,6 +19,7 @@
   <img alt="Qt 6" src="https://img.shields.io/badge/GUI-Qt%206-41cd52?style=flat-square&logo=qt&logoColor=white">
   <img alt="Fedora 44" src="https://img.shields.io/badge/RPM-Fedora%2044-51a2da?style=flat-square&logo=fedora&logoColor=white">
   <img alt="Debian 13 · Ubuntu 24.04 · 26.04" src="https://img.shields.io/badge/DEB-Debian%2013%20%C2%B7%20Ubuntu%2024.04%20%C2%B7%2026.04-a80030?style=flat-square&logo=debian&logoColor=white">
+  <img alt="Windows 10 · 11 (port)" src="https://img.shields.io/badge/Windows%2010%20%C2%B7%2011-port-0078d4?style=flat-square&logo=windows&logoColor=white">
   <img alt="Versão 0.4.7" src="https://img.shields.io/badge/vers%C3%A3o-0.4.7-c6f432?style=flat-square">
   <img alt="Licença: MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-3a3a3a?style=flat-square">
   <img alt="Estado: alfa" src="https://img.shields.io/badge/estado-alfa-d69e2e?style=flat-square">
@@ -152,6 +153,8 @@ sudo apt install ./framux_0.4.7-1_${d}_amd64.deb \
 
 ### Windows 10 e 11 (64 bits)
 
+O Framux nasceu no Linux, que continua sendo a plataforma principal; o Windows é um port do mesmo código, com as partes do sistema trocadas (veja [Compilar](#compilar)).
+
 | Arquivo                                   | Conteúdo                                                        |
 | ----------------------------------------- | --------------------------------------------------------------- |
 | `framux-0.4.7-windows-x64-setup.exe`      | instalador: janela, CLI, daemon, camada Vulkan, atalho no menu  |
@@ -166,11 +169,15 @@ Como cada tipo de jogo é atendido no Windows:
 | Vulkan                    | camada no jogo (como no Linux)          | dentro do jogo, inclusive tela cheia       | camada no jogo                 |
 | Direct3D 9/10/11/12, OpenGL | eventos de present do Windows (ETW)   | janela sobreposta (janela e sem bordas)    | Windows Graphics Capture       |
 
-Nos jogos DirectX e OpenGL nada é injetado no processo do jogo: o Framux mede e captura de fora, como o PresentMon e a Barra de Jogos, então não briga com anti-cheat. Em tela cheia exclusiva (rara nos jogos atuais) o contador sobreposto não aparece; o resto funciona. A gravação usa NVENC (NVIDIA), AMF (AMD) ou QSV (Intel) e grava só o som do jogo (loopback de processo do WASAPI).
+Nos jogos DirectX e OpenGL nada é injetado no processo do jogo: o Framux mede e captura de fora, como o PresentMon e a Barra de Jogos, então não briga com anti-cheat. A gravação usa NVENC (NVIDIA), AMF (AMD) ou QSV (Intel) e grava só o som do jogo (loopback de processo do WASAPI).
+
+**Tela cheia exclusiva:** nesse modo (raro nos jogos atuais) o Windows não mostra nenhuma janela sobre o jogo, então o contador sobreposto não aparece; FPS, benchmark, screenshots e gravação continuam funcionando. O Framux avisa: um selo amarelo na barra de status, um banner na aba FPS com o que fazer (mudar o modo de tela do jogo para _Janela sem bordas_, que pode aparecer como _Tela cheia (janela)_, _Borderless_ ou _Fullscreen Windowed_) e uma notificação ao entrar no modo e ao apertar o atalho do overlay nele. _Não mostrar novamente para este jogo_ desliga os avisos daquele jogo (`exclusive_notice = false` no arquivo do jogo).
+
+**Primeiros passos no Windows:** abra o Framux pelo menu Iniciar; a janela inicia o daemon e fica na bandeja. Jogos DirectX e OpenGL são detectados sozinhos assim que começam a desenhar, sem configurar nada. Para jogos Vulkan, ligue _Ativar automaticamente nos jogos Vulkan_ na aba Geral (jogos da Steam e da lista) ou use nas opções de inicialização da Steam o comando `framux run %command%` que a aba mostra. "Parar o Framux" (aba Geral ou bandeja) encerra o monitoramento.
 
 ## Uso
 
-Abra **Framux** no menu de aplicativos (ou `framux` sem argumentos). Na aba **Geral**, ligue _Ativar automaticamente nos jogos_ e saia/entre na sessão uma vez. Jogos OpenGL nativos ou fora da Steam usam `framux run %command%` nas opções de inicialização.
+Abra **Framux** no menu de aplicativos (ou `framux` sem argumentos). Na aba **Geral**, ligue _Ativar automaticamente nos jogos_ e saia/entre na sessão uma vez. Jogos OpenGL nativos ou fora da Steam usam `framux run %command%` nas opções de inicialização. No Windows, veja [primeiros passos no Windows](#windows-10-e-11-64-bits).
 
 ### Atalhos
 
@@ -222,6 +229,8 @@ framux config default                 # config padrão comentável
 | Sessão X11                                             | `XGrabKey` no daemon                 | funciona com qualquer janela em foco; a tecla não chega ao jogo              |
 | Wayland (GNOME/KDE) + jogo em XWayland (inclui Proton) | leitura in-game (`xcb_query_keymap`) | só com o jogo em foco; a tecla continua chegando ao jogo                     |
 | Jogo com janela Wayland nativa                         | —                                    | ainda sem hotkeys; use a CLI (portal GlobalShortcuts ainda não implementado) |
+| Windows, jogo Vulkan                                   | leitura in-game (`GetAsyncKeyState`) | só com o jogo em foco; a tecla continua chegando ao jogo                     |
+| Windows, jogo DirectX/OpenGL                           | leitura pelo daemon (`GetAsyncKeyState`) | só com o jogo em foco; a tecla continua chegando ao jogo                 |
 
 ## Gravação
 
@@ -300,6 +309,8 @@ Feche e abra o Steam depois de mudar. As cópias são renovadas quando a janela 
 
 `~/.config/framux/config.toml` (veja [`data/config.toml`](data/config.toml)), com overrides por jogo em `~/.config/framux/games/<exe>.toml` (`wine-<exe>.toml` no Wine/Proton). Mudanças são recarregadas sozinhas.
 
+No Windows: `%APPDATA%\framux\config.toml`, overrides em `%APPDATA%\framux\games\<exe>.toml` e o log do daemon em `%LOCALAPPDATA%\framux\framuxd.log`.
+
 <details>
 <summary><b>Variáveis de ambiente</b></summary>
 
@@ -344,6 +355,12 @@ O loop recording (`framux loop`, `[hotkeys] loop_save`) ainda responde "indispon
 - Jogos com janela Wayland nativa não recebem hotkeys (use a CLI).
 - Jogos nativos com anti-cheat podem recusar `LD_PRELOAD` (`FRAMUX_NO_GL=1` ou `[filters]`); a camada Vulkan costuma ser aceita sob Proton.
 - Um present com vários swapchains desenha o overlay só no primeiro.
+
+No port para Windows:
+
+- Em jogos DirectX/OpenGL, o contador é uma janela sobreposta e não aparece em tela cheia exclusiva (o Framux avisa; veja [Windows](#windows-10-e-11-64-bits)). Jogos Vulkan não têm essa limitação.
+- Em tela cheia exclusiva, alt+tab minimiza o jogo, que para de desenhar: a gravação mantém a última imagem até ele voltar (o áudio segue sincronizado).
+- Jogos rodando como administrador não são medidos por um Framux sem elevação.
 
 ## Compilar
 

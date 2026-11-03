@@ -24,6 +24,7 @@ show_frametime     = false
 color_normal       = "#C6F432"
 color_recording    = "#FF3030"
 color_benchmark    = "#30FF60"
+exclusive_notice   = true          # Windows: avisa quando o jogo está em tela cheia exclusiva (contador invisível)
 
 [benchmark]
 folder             = "~/.local/share/framux/benchmarks"
