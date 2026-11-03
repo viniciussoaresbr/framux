@@ -959,7 +959,12 @@ void Daemon::on_key(Session *from, uint32_t keysym, uint32_t mods, bool pressed)
   }
   switch (action) {
     case kActBenchmark: bench_action(s, "toggle", 0); break;
-    case kActOverlay: overlay_action(s, "toggle"); break;
+    case kActOverlay:
+      overlay_action(s, "toggle");
+#ifdef _WIN32
+      ext_overlay_key_notice(*s);
+#endif
+      break;
     case kActOverlayCorner: overlay_action(s, "next"); break;
     case kActScreenshot:
       if (s->cfg.screenshot.repeat_every_s > 0) {
@@ -1435,7 +1440,15 @@ std::string Daemon::status_text(bool json) {
         << ",\"overlay\":" << json_str(corner_name(s->corner)) << ",\"benchmark\":" << (s->bench ? "true" : "false")
         << ",\"recording\":" << (s->rec ? "true" : "false")
         << ",\"recording_s\":" << (s->rec ? (now - s->rec_start_ns) / kNsPerSec : 0)
-        << ",\"dropped_records\":" << s->dropped_records + s->lost_records << "}";
+        << ",\"dropped_records\":" << s->dropped_records + s->lost_records;
+#ifdef _WIN32
+      // Jogo medido de fora em tela cheia exclusiva: o contador não aparece.
+      if (s->external) o << ",\"exclusive\":" << (s->ext_exclusive ? "true" : "false");
+      // Aviso desligado para este jogo por "Não mostrar novamente".
+      o << ",\"exclusive_notice\":" << (s->cfg.overlay.exclusive_notice ? "true" : "false");
+#endif
+      o << ",\"config_name\":" << json_str(s->config_name);
+      o << "}";
       first = false;
     }
     o << "]}";

@@ -136,6 +136,9 @@ class CornerPreview : public QWidget {
  public:
   explicit CornerPreview(QWidget *parent = nullptr);
   void set_state(ipc::Corner corner, Rgb color, bool frametime);
+  // Jogo ativo em tela cheia exclusiva: legenda "Não visível em tela cheia
+  // exclusiva" no meio da prévia. Os cliques continuam mudando o canto.
+  void set_unavailable(bool on);
   std::function<void(ipc::Corner)> on_corner;
 
   QSize sizeHint() const override { return {320, 180}; }
@@ -157,6 +160,7 @@ class CornerPreview : public QWidget {
   ipc::Corner hover_ = ipc::Corner::Hidden;
   Rgb color_;
   bool frametime_ = false;
+  bool unavailable_ = false;
 };
 
 // "Pasta  ~/Imagens/framux  [Alterar] [Abrir]".

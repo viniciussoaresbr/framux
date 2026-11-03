@@ -348,22 +348,36 @@ void Daemon::ext_tick() {
   // Em tela cheia exclusiva o jogo apresenta direto no monitor, sem passar
   // pelo compositor: nenhuma janela de fora aparece por cima, o contador
   // incluído (FPS, benchmark, screenshot e gravação seguem funcionando).
-  // O Windows informa esse modo; avisa uma vez por sessão.
+  // O Windows informa esse modo. O estado vai para o StatusJson (aviso na
+  // janela do Framux) e é lido só com o jogo em foco: fora dele (alt+tab), o
+  // último valor visto continua valendo. A notificação sai uma vez por sessão.
   static uint64_t next_check = 0;
-  if (d.visible && !a->ext_exclusive_warned && now >= next_check) {
+  if (now >= next_check) {
     next_check = now + kNsPerSec;
     QUERY_USER_NOTIFICATION_STATE q{};
-    if (SUCCEEDED(SHQueryUserNotificationState(&q)) && q == QUNS_RUNNING_D3D_FULL_SCREEN) {
+    a->ext_exclusive = SUCCEEDED(SHQueryUserNotificationState(&q)) && q == QUNS_RUNNING_D3D_FULL_SCREEN;
+    if (a->ext_exclusive && d.visible && !a->ext_exclusive_warned) {
       a->ext_exclusive_warned = true;
       FRAMUX_LOG("%s: em tela cheia exclusiva; o contador não aparece sobre o jogo nesse modo",
                  a->game.c_str());
-      notify("Contador indisponível em tela cheia exclusiva",
-             a->game + " está em tela cheia exclusiva, modo em que o Windows não mostra janelas sobre o jogo. "
-                       "Para ver o contador, escolha \"tela cheia em janela\" (sem bordas) ou janela nas opções de "
-                       "vídeo do jogo. FPS, benchmark, screenshot e gravação funcionam em qualquer modo.",
-             "dialog-information");
+      if (a->cfg.overlay.exclusive_notice)
+        notify("O contador não aparece neste jogo",
+               a->game + " está em tela cheia exclusiva. Para ver o contador, mude o modo de tela nas "
+                         "configurações de vídeo do jogo para Janela sem bordas (ou Janela).",
+               "dialog-information");
     }
   }
+}
+
+void Daemon::ext_overlay_key_notice(Session &s) {
+  if (!s.external || !s.ext_exclusive || !s.cfg.overlay.exclusive_notice) return;
+  const uint64_t now = now_ns();
+  if (s.ext_key_notice_ns && now - s.ext_key_notice_ns < 30 * kNsPerSec) return;
+  s.ext_key_notice_ns = now;
+  FRAMUX_LOG("%s: atalho do overlay em tela cheia exclusiva; avisando que o contador não aparece", s.game.c_str());
+  const std::string body = s.game + " está em tela cheia exclusiva, e o Windows não mostra o contador sobre o jogo. "
+                                    "Mude para Janela sem bordas nas configurações de vídeo do jogo.";
+  notify("O contador não aparece neste jogo", body, "dialog-information");
 }
 
 // Atalhos de um jogo medido de fora, com o jogo em foco: a mesma leitura de

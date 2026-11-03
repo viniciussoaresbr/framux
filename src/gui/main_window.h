@@ -21,6 +21,7 @@
 class QButtonGroup;
 class QComboBox;
 class QFormLayout;
+class QPushButton;
 class QRadioButton;
 class QSlider;
 class QSpinBox;
@@ -88,6 +89,30 @@ class MainWindow : public QMainWindow {
   QStackedWidget *pages_ = nullptr;
   QLabel *status_dot_ = nullptr;
   QLabel *status_text_ = nullptr;
+  // Tela cheia exclusiva (Windows): selo na barra de status, que leva ao
+  // banner do cartão Overlay; o banner explica o que fazer.
+  QPushButton *status_badge_ = nullptr;
+  QWidget *fps_page_ = nullptr;       // para rolar até o banner
+  QFrame *overlay_card_ = nullptr;
+  QFrame *notice_ = nullptr;          // banner (estado "info" ou "success")
+  QLabel *notice_icon_ = nullptr;
+  QLabel *notice_title_ = nullptr;
+  QWidget *notice_body_ = nullptr;    // ação, nomes, garantia, links
+  QPushButton *notice_why_btn_ = nullptr;
+  QLabel *notice_why_ = nullptr;
+  QFrame *notice_muted_ = nullptr;    // "Avisos ocultos para este jogo. Mostrar de novo"
+  QTimer notice_success_timer_;
+  bool notice_success_ = false;
+  // Último estado visto, para perceber a saída da tela exclusiva.
+  qint64 last_session_ = -1;
+  bool last_exclusive_ = false;
+  bool exclusive_ = false;
+  bool exclusive_notice_ = true;      // false = "Não mostrar novamente" neste jogo
+  QString active_config_name_;
+  void update_exclusive_notice();
+  void clear_exclusive();
+  void show_overlay_notice();
+  void hide_notices_for_game(bool hide);
   QTimer poll_timer_;
   bool daemon_up_ = false;
   QString hotkey_backend_;

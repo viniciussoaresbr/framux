@@ -32,6 +32,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStyle>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -177,8 +178,20 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store), audio_devices_(std::
   status_dot_ = new QLabel("●", status);
   status_text_ = new QLabel(status);
   status_text_->setTextFormat(Qt::RichText);
+  // Selo ao lado das informações do jogo: em tela cheia exclusiva o Windows
+  // não mostra janelas sobre o jogo, então o contador não aparece. O clique
+  // leva ao banner da aba FPS, que explica o que fazer.
+  status_badge_ = new QPushButton(QString::fromUtf8("⚠ Contador indisponível neste modo"), status);
+  status_badge_->setObjectName("warnBadge");
+  status_badge_->setCursor(Qt::PointingHandCursor);
+  status_badge_->setToolTip("O jogo está em tela cheia exclusiva. Clique para ver o que fazer.");
+  status_badge_->hide();
+  connect(status_badge_, &QPushButton::clicked, this, [this] { show_overlay_notice(); });
   sh->addWidget(status_dot_);
-  sh->addWidget(status_text_, 1);
+  sh->addWidget(status_text_);
+  sh->addSpacing(8);
+  sh->addWidget(status_badge_);
+  sh->addStretch(1);
   v->addWidget(status);
 
   pages_ = new QStackedWidget(central);
@@ -201,6 +214,13 @@ MainWindow::MainWindow(ConfigStore &store) : store_(store), audio_devices_(std::
   build_tray();
   load_from_config();
   store_.on_external_change([this] { load_from_config(); });
+
+  // Sucesso ao sair da tela exclusiva: verde por 5 s, depois some.
+  notice_success_timer_.setSingleShot(true);
+  connect(&notice_success_timer_, &QTimer::timeout, this, [this] {
+    notice_success_ = false;
+    update_exclusive_notice();
+  });
 
   set_status("#888", "Procurando o Framux…");
   connect(&poll_timer_, &QTimer::timeout, this, [this] { poll_status(); });
@@ -398,6 +418,92 @@ QWidget *MainWindow::build_fps() {
 
   QVBoxLayout *b;
   QFrame *ov = card("Overlay", page, &b);
+  fps_page_ = page;
+  overlay_card_ = ov;
+
+  // Banner de tela cheia exclusiva: título, ação, nomes do modo nos jogos,
+  // garantia e um "por quê" recolhível. Vira verde por 5 s quando o jogo sai
+  // da tela exclusiva.
+  notice_ = new QFrame(ov);
+  notice_->setObjectName("noticeBanner");
+  notice_->setProperty("state", "info");
+  auto *nh = new QHBoxLayout(notice_);
+  nh->setContentsMargins(12, 10, 12, 10);
+  nh->setSpacing(10);
+  notice_icon_ = new QLabel(QString::fromUtf8("⚠"), notice_);
+  notice_icon_->setObjectName("noticeIcon");
+  notice_icon_->setAlignment(Qt::AlignTop);
+  nh->addWidget(notice_icon_);
+  auto *nv = new QVBoxLayout;
+  nv->setSpacing(4);
+  notice_title_ = new QLabel("O contador não aparece neste jogo", notice_);
+  notice_title_->setObjectName("noticeTitle");
+  nv->addWidget(notice_title_);
+  notice_body_ = new QWidget(notice_);
+  auto *bv = new QVBoxLayout(notice_body_);
+  bv->setContentsMargins(0, 0, 0, 0);
+  bv->setSpacing(4);
+  auto *action = new QLabel(
+      "O jogo está em tela cheia exclusiva. Para ver o contador, mude o modo de tela nas configurações de "
+      "vídeo do jogo para <b>Janela sem bordas</b> (ou Janela).",
+      notice_body_);
+  action->setWordWrap(true);
+  bv->addWidget(action);
+  bv->addWidget(hint("Pode aparecer como: Janela sem bordas, Tela cheia (janela), Borderless, Fullscreen Windowed "
+                     "ou Windowed Fullscreen.",
+                     notice_body_));
+  auto *guarantee =
+      new QLabel("Gravação, capturas, benchmark e a medição de FPS continuam funcionando.", notice_body_);
+  guarantee->setWordWrap(true);
+  bv->addWidget(guarantee);
+  auto *links = new QHBoxLayout;
+  links->setContentsMargins(0, 2, 0, 0);
+  notice_why_btn_ = new QPushButton(QString::fromUtf8("▸ Por que isso acontece?"), notice_body_);
+  notice_why_btn_->setObjectName("linkButton");
+  notice_why_btn_->setCursor(Qt::PointingHandCursor);
+  links->addWidget(notice_why_btn_);
+  links->addStretch();
+  auto *never = new QPushButton("Não mostrar novamente para este jogo", notice_body_);
+  never->setObjectName("linkButton");
+  never->setCursor(Qt::PointingHandCursor);
+  links->addWidget(never);
+  bv->addLayout(links);
+  notice_why_ = hint(
+      "Em tela cheia exclusiva o jogo envia a imagem direto ao monitor, sem passar pelo compositor do Windows. "
+      "Por isso nenhuma janela de outro programa aparece sobre ele, e o contador do Framux é uma dessas janelas. "
+      "Em Janela sem bordas o Windows compõe a tela e o contador aparece. Em alguns jogos, Alt+Enter alterna "
+      "entre tela cheia e janela.",
+      notice_body_);
+  notice_why_->hide();  // começa recolhido
+  bv->addWidget(notice_why_);
+  nv->addWidget(notice_body_);
+  nh->addLayout(nv, 1);
+  notice_->hide();
+  b->addWidget(notice_);
+  connect(notice_why_btn_, &QPushButton::clicked, this, [this] {
+    const bool show = notice_why_->isHidden();
+    notice_why_->setVisible(show);
+    notice_why_btn_->setText(QString::fromUtf8(show ? "▾ Por que isso acontece?" : "▸ Por que isso acontece?"));
+  });
+  connect(never, &QPushButton::clicked, this, [this] { hide_notices_for_game(true); });
+
+  // Com o aviso desligado para o jogo: uma linha discreta para desfazer.
+  notice_muted_ = new QFrame(ov);
+  notice_muted_->setObjectName("noticeMuted");
+  auto *mh = new QHBoxLayout(notice_muted_);
+  mh->setContentsMargins(0, 0, 0, 0);
+  auto *muted_text = hint("Avisos de tela cheia exclusiva ocultos para este jogo.", notice_muted_);
+  muted_text->setWordWrap(false);
+  mh->addWidget(muted_text);
+  auto *again = new QPushButton("Mostrar avisos de novo", notice_muted_);
+  again->setObjectName("linkButton");
+  again->setCursor(Qt::PointingHandCursor);
+  mh->addWidget(again);
+  mh->addStretch();
+  notice_muted_->hide();
+  b->addWidget(notice_muted_);
+  connect(again, &QPushButton::clicked, this, [this] { hide_notices_for_game(false); });
+
   auto *row = new QHBoxLayout;
   row->setSpacing(18);
   auto *left = new QVBoxLayout;
@@ -1063,6 +1169,7 @@ void MainWindow::poll_status() {
       }
       if (!up) {
         self->set_status("#e5534b", "Framux parado: abra o Framux de novo para voltar a monitorar");
+        self->clear_exclusive();
         return;
       }
       if (r.ok) self->apply_status(QByteArray::fromStdString(r.text));
@@ -1077,6 +1184,7 @@ void MainWindow::poll_status() {
   }
   if (!up) {
     set_status("#e5534b", "Framux parado: o monitoramento volta quando um jogo for aberto com ele ativo");
+    clear_exclusive();
     return;
   }
   auto msg = QDBusMessage::createMethodCall(kBus, kPath, kBus, "StatusJson");
@@ -1113,6 +1221,7 @@ void MainWindow::apply_status(const QByteArray &json) {
   }
   if (active.isEmpty()) {
     set_status("#8a8b91", "Nenhum jogo em execução");
+    clear_exclusive();
     if (tray_) {
       tray_->setToolTip("Framux: nenhum jogo em execução");
       tray_->setIcon(app_icon());
@@ -1136,6 +1245,22 @@ void MainWindow::apply_status(const QByteArray &json) {
   }
   if (count > 1) text += QString(" · +%1").arg(count - 1);
   set_status("#3ec46d", text);
+  // Tela cheia exclusiva: saindo dela na mesma sessão, o banner fica verde.
+  const qint64 session = active.value("id").toInteger(-1);
+  const bool exclusive = active.value("exclusive").toBool();
+  exclusive_notice_ = active.value("exclusive_notice").toBool(true);
+  active_config_name_ = active.value("config_name").toString();
+  if (session == last_session_ && last_exclusive_ && !exclusive && exclusive_notice_) {
+    notice_success_ = true;
+    notice_success_timer_.start(5000);
+  } else if (session != last_session_ || exclusive) {
+    notice_success_ = false;
+    notice_success_timer_.stop();
+  }
+  last_session_ = session;
+  last_exclusive_ = exclusive;
+  exclusive_ = exclusive;
+  update_exclusive_notice();
   if (tray_) {
     tray_->setToolTip(QString("Framux: %1 — %2 fps%3")
                           .arg(active.value("game").toString())
@@ -1148,6 +1273,73 @@ void MainWindow::apply_status(const QByteArray &json) {
 void MainWindow::set_status(const QString &dot_color, const QString &text) {
   status_dot_->setStyleSheet(QString("color:%1;").arg(dot_color));
   status_text_->setText(text);
+}
+
+// Sem jogo ativo (ou daemon parado): nada de aviso.
+void MainWindow::clear_exclusive() {
+  exclusive_ = false;
+  last_exclusive_ = false;
+  last_session_ = -1;
+  notice_success_ = false;
+  notice_success_timer_.stop();
+  update_exclusive_notice();
+}
+
+// Selo, banner (informativo ou de sucesso), linha de "avisos ocultos" e
+// prévia, conforme o jogo ativo.
+void MainWindow::update_exclusive_notice() {
+  if (!notice_) return;
+  const bool info = exclusive_ && exclusive_notice_;
+  const bool success = notice_success_ && !exclusive_;
+  status_badge_->setVisible(exclusive_);
+  if (status_badge_->property("muted").toBool() != !exclusive_notice_) {
+    status_badge_->setProperty("muted", !exclusive_notice_);
+    status_badge_->style()->unpolish(status_badge_);
+    status_badge_->style()->polish(status_badge_);
+  }
+  status_badge_->setToolTip(exclusive_notice_
+                                ? "O jogo está em tela cheia exclusiva. Clique para ver o que fazer."
+                                : "O jogo está em tela cheia exclusiva (avisos ocultos para este jogo). "
+                                  "Clique para mostrar os avisos de novo.");
+  const QString state = success ? "success" : "info";
+  if (notice_->property("state").toString() != state) {
+    for (QWidget *w : {static_cast<QWidget *>(notice_), static_cast<QWidget *>(notice_icon_)}) {
+      w->setProperty("state", state);
+      w->style()->unpolish(w);
+      w->style()->polish(w);
+    }
+  }
+  notice_icon_->setText(QString::fromUtf8(success ? "✓" : "⚠"));
+  notice_title_->setText(success ? "Pronto! O contador já deve estar visível no jogo."
+                                 : "O contador não aparece neste jogo");
+  notice_body_->setVisible(!success);
+  notice_->setVisible(info || success);
+  notice_muted_->setVisible(exclusive_ && !exclusive_notice_);
+  preview_->set_unavailable(exclusive_);
+}
+
+// Clique no selo: aba FPS, rolada até o banner.
+void MainWindow::show_overlay_notice() {
+  if (!exclusive_notice_) hide_notices_for_game(false);
+  select_tab(1);
+  for (QWidget *p = fps_page_; p; p = p->parentWidget())
+    if (auto *area = qobject_cast<QScrollArea *>(p)) {
+      area->ensureWidgetVisible(overlay_card_, 0, 0);
+      break;
+    }
+}
+
+// "Não mostrar novamente para este jogo" (e o inverso): grava no arquivo do
+// jogo; o framuxd recarrega e o próximo status já vem com o valor novo.
+void MainWindow::hide_notices_for_game(bool hide) {
+  if (active_config_name_.isEmpty()) return;
+  std::string err;
+  if (!set_game_config_bool(active_config_name_.toStdString(), "overlay", "exclusive_notice", !hide, &err)) {
+    QMessageBox::warning(this, "Framux", QString::fromStdString(err));
+    return;
+  }
+  exclusive_notice_ = !hide;
+  update_exclusive_notice();
 }
 
 void MainWindow::update_environment() {

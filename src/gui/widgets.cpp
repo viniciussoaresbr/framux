@@ -543,6 +543,12 @@ void CornerPreview::set_state(ipc::Corner corner, Rgb color, bool frametime) {
   update();
 }
 
+void CornerPreview::set_unavailable(bool on) {
+  if (on == unavailable_) return;
+  unavailable_ = on;
+  update();
+}
+
 QRect CornerPreview::screen_rect() const {
   int w = width(), h = w * 9 / 16;
   if (h > height()) {
@@ -618,6 +624,22 @@ void CornerPreview::paintEvent(QPaintEvent *) {
   fill(d.outline, d.outline_color);
   fill(d.text, d.text_color);
   p.restore();
+
+  // Em tela cheia exclusiva o contador não aparece no jogo: legenda no meio.
+  if (unavailable_) {
+    const QString legend = QString::fromUtf8("Não visível em tela cheia exclusiva");
+    QFont f = font();
+    f.setBold(true);
+    p.setFont(f);
+    const QFontMetrics fm(f);
+    const int pw = fm.horizontalAdvance(legend) + 20, ph = fm.height() + 10;
+    const QRectF pill(r.center().x() - pw / 2.0, r.center().y() - ph / 2.0, pw, ph);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0x16, 0x17, 0x1b, 220));
+    p.drawRoundedRect(pill, ph / 2.0, ph / 2.0);
+    p.setPen(QColor(0xe6, 0xe6, 0xe9));
+    p.drawText(pill, Qt::AlignCenter, legend);
+  }
 
   p.setClipping(false);
   p.setPen(QPen(palette().color(QPalette::Mid), 1));

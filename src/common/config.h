@@ -49,6 +49,9 @@ struct Config {
     Rgb color_normal{0xC6, 0xF4, 0x32};  // verde-limão da logo
     Rgb color_recording{0xFF, 0x30, 0x30};
     Rgb color_benchmark{0x30, 0xFF, 0x60};
+    // Windows: aviso de tela cheia exclusiva (banner e notificações). Desligado
+    // por jogo, em games/<nome>.toml, por "Não mostrar novamente".
+    bool exclusive_notice = true;
   } overlay;
 
   struct Benchmark {
@@ -137,6 +140,11 @@ bool apply_config_toml(Config &cfg, const std::string &text, const std::string &
 // Caminho do arquivo principal (FRAMUX_CONFIG ou config_dir()/config.toml).
 std::string main_config_path();
 std::string game_config_path(const std::string &config_name);
+
+// Grava uma chave booleana no arquivo do jogo (games/<nome>.toml), mantendo o
+// resto dele. Cria o arquivo e a pasta se preciso.
+bool set_game_config_bool(const std::string &config_name, const std::string &section, const std::string &key,
+                          bool value, std::string *err);
 
 // Padrões + arquivo principal + override do jogo (se config_name não vazio).
 Config load_config(const std::string &config_name, std::vector<std::string> *warnings);

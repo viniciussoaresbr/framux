@@ -127,6 +127,8 @@ struct Session {
   std::unique_ptr<WindowCapture> ext_capture;
   bool ext_keys[6] = {};
   bool ext_exclusive_warned = false;  // aviso de tela cheia exclusiva já dado
+  bool ext_exclusive = false;         // em tela cheia exclusiva (último valor visto com o jogo em foco)
+  uint64_t ext_key_notice_ns = 0;     // última notificação do atalho do overlay em tela exclusiva
   ~Session();
 #endif
 
@@ -169,6 +171,9 @@ class Daemon {
   void ext_poll_keys(Session &s);
   void ext_shot(Session &s, uint64_t request_id);
   bool ext_video_start(Session &s, std::string *err);
+  // Atalho do overlay com o jogo em tela cheia exclusiva: o contador não
+  // aparece, então avisa (no máximo uma vez a cada 30 s).
+  void ext_overlay_key_notice(Session &s);
 #endif
   void close_session(uint64_t id, const char *why);
   void handle_hello(Session &s, const ipc::Message &m);

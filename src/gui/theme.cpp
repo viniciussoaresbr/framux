@@ -54,6 +54,18 @@ QFrame#card { background: %1; border: 1px solid %2; border-radius: 10px; }
 QLabel#cardTitle { font-weight: 700; font-size: 11pt; }
 QLabel#muted, QLabel#hint { color: %4; }
 QLabel#warn { color: #e8912d; }
+QPushButton#warnBadge { background: #f2c230; color: #1d1d1f; border: none; border-radius: 6px; padding: 2px 8px; font-weight: 600; }
+QPushButton#warnBadge:hover { background: #f6d35e; }
+QPushButton#warnBadge[muted="true"] { background: #3a3b42; color: %4; font-weight: 400; }
+QPushButton#warnBadge[muted="true"]:hover { background: #44454c; }
+QFrame#noticeBanner { background: #2c2e35; border: 1px solid %2; border-left: 3px solid #f2c230; border-radius: 8px; }
+QFrame#noticeBanner[state="success"] { border-left: 3px solid #3ec46d; }
+QFrame#noticeBanner QLabel { background: transparent; }
+QLabel#noticeIcon { color: #f2c230; font-size: 14pt; font-weight: 700; }
+QLabel#noticeIcon[state="success"] { color: #3ec46d; }
+QLabel#noticeTitle { font-weight: 700; }
+QPushButton#linkButton { background: transparent; border: none; padding: 0; color: %4; text-align: left; }
+QPushButton#linkButton:hover { background: transparent; color: %3; }
 QWidget#statusBar { background: %1; border: 1px solid %2; border-radius: 8px; }
 QPushButton, QToolButton#clearKey {
   padding: 5px 14px; border-radius: 6px; border: 1px solid %2; background: %5;

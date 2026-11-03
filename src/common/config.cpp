@@ -232,7 +232,8 @@ Schema make_schema(Config &cfg) {
         {"show_frametime", boolean(o.show_frametime)},
         {"color_normal", color(o.color_normal)},
         {"color_recording", color(o.color_recording)},
-        {"color_benchmark", color(o.color_benchmark)}}},
+        {"color_benchmark", color(o.color_benchmark)},
+        {"exclusive_notice", boolean(o.exclusive_notice)}}},
       {"benchmark",
        {{"folder", string(b.folder)},
         {"stop_after_s", uinteger(b.stop_after_s, 86400)},
@@ -364,6 +365,46 @@ Config load_config(const std::string &config_name, std::vector<std::string> *war
   return cfg;
 }
 
+bool set_game_config_bool(const std::string &config_name, const std::string &section, const std::string &key,
+                          bool value, std::string *err) {
+  if (config_name.empty()) {
+    if (err) *err = "jogo sem nome de configuração";
+    return false;
+  }
+  const std::string path = game_config_path(config_name);
+  bool exists = false;
+  const std::string text = read_file(path, &exists);
+  toml::table t;
+  if (exists && !text.empty()) {
+    toml::parse_result res = toml::parse(text, path);
+    if (!res) {
+      if (err) *err = path + ": TOML inválido; corrija o arquivo antes";
+      return false;
+    }
+    t = std::move(res.table());
+  }
+  toml::table *sec = t[section].as_table();
+  if (!sec) {
+    t.insert_or_assign(section, toml::table{});
+    sec = t[section].as_table();
+  }
+  sec->insert_or_assign(key, value);
+  if (!make_dirs(config_dir() + "/games", err)) return false;
+  std::ostringstream ss;
+  ss << t << "\n";
+#ifdef _WIN32
+  std::ofstream out(std::filesystem::path(win::widen(path)), std::ios::binary | std::ios::trunc);
+#else
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+#endif
+  out << ss.str();
+  if (!out.good()) {
+    if (err) *err = "não foi possível gravar " + path;
+    return false;
+  }
+  return true;
+}
+
 const char *corner_name(ipc::Corner c) {
   switch (c) {
     case ipc::Corner::TopLeft: return "top-left";
@@ -431,7 +472,8 @@ std::string config_to_toml(const Config &c) {
                               {"show_frametime", c.overlay.show_frametime},
                               {"color_normal", color_str(c.overlay.color_normal)},
                               {"color_recording", color_str(c.overlay.color_recording)},
-                              {"color_benchmark", color_str(c.overlay.color_benchmark)}}},
+                              {"color_benchmark", color_str(c.overlay.color_benchmark)},
+                              {"exclusive_notice", c.overlay.exclusive_notice}}},
       {"benchmark", toml::table{{"folder", c.benchmark.folder},
                                 {"stop_after_s", int64_t(c.benchmark.stop_after_s)},
                                 {"logs", logs},
